@@ -1,60 +1,19 @@
 import {
   BadRequestException,
   Injectable,
-  InternalServerErrorException,
-  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { LoginDto } from './dto/login.schema';
 import * as bcrypt from 'bcrypt';
-
-type AuthProviderRecord = {
-  provider: string;
-  providerId: string;
-};
-
-type UserMasterRecord = {
-  id: number;
-  uuid: string;
-  name: string;
-  email: string;
-  password: string | null;
-  organizationId: number;
-  authProviders: AuthProviderRecord[];
-};
-
-type UserMasterDelegate = {
-  findFirst(args: {
-    where: {
-      email: string;
-      organizationId: number;
-      isDeleted: false;
-    };
-    include: {
-      authProviders: true;
-    };
-  }): Promise<UserMasterRecord | null>;
-};
-
-type PrismaLike = {
-  userMaster: UserMasterDelegate;
-};
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AuthService {
   constructor(
-    @Optional() private readonly prisma: PrismaLike | undefined,
+    private readonly prisma: PrismaService,
     private jwtService: JwtService,
   ) {}
-
-  private get userMaster() {
-    if (!this.prisma) {
-      throw new InternalServerErrorException('Prisma client is not configured');
-    }
-
-    return this.prisma.userMaster;
-  }
 
   async login(data: LoginDto) {
     const { email, password, provider, providerId, organizationId } = data;
@@ -65,7 +24,7 @@ export class AuthService {
       throw new BadRequestException('Provider ID is required for Google login');
     }
 
-    const user = await this.userMaster.findFirst({
+    const user = await this.prisma.userMaster.findFirst({
       where: {
         email: normalizedEmail,
         organizationId,
@@ -93,7 +52,7 @@ export class AuthService {
     }
 
     if (provider === 'GOOGLE') {
-      const providerExists = user.authProviders.find(
+      const providerExists = (user.authProviders ?? []).find(
         (authProvider) =>
           authProvider.provider === 'GOOGLE' &&
           authProvider.providerId === normalizedProviderId,

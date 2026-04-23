@@ -2,72 +2,14 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
-  InternalServerErrorException,
-  Optional,
 } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.schema';
 import * as bcrypt from 'bcrypt';
 
-type UserMasterRecord = {
-  id: number;
-  uuid: string;
-  name: string;
-  email: string;
-  password: string | null;
-  isActive: boolean;
-  organizationId: number;
-  userTypeId: number;
-  createdById: number | null;
-  updatedById: number | null;
-  deletedById: number | null;
-  createdAt: Date;
-  updatedAt: Date;
-  isDeleted: boolean;
-  deletedAt: Date | null;
-};
-
-type UserMasterDelegate = {
-  findFirst(args: {
-    where: {
-      email: string;
-      organizationId: number;
-    };
-  }): Promise<UserMasterRecord | null>;
-  create(args: {
-    data: {
-      name: string;
-      email: string;
-      password: string | null;
-      organizationId: number;
-      userTypeId: number;
-      authProviders: {
-        create: {
-          provider: CreateUserDto['provider'];
-          providerId: string;
-        };
-      };
-    };
-    include: {
-      authProviders: true;
-    };
-  }): Promise<UserMasterRecord & { authProviders: unknown[] }>;
-};
-
-type PrismaLike = {
-  userMaster: UserMasterDelegate;
-};
-
 @Injectable()
 export class UsersService {
-  constructor(@Optional() private readonly prisma?: PrismaLike) {}
-
-  private get userMaster() {
-    if (!this.prisma) {
-      throw new InternalServerErrorException('Prisma client is not configured');
-    }
-
-    return this.prisma.userMaster;
-  }
+  constructor(private readonly prisma: PrismaService) {}
 
   async createUser(data: CreateUserDto) {
     const { email, password, provider, providerId } = data;
@@ -78,7 +20,7 @@ export class UsersService {
       throw new BadRequestException('Provider ID is required for Google login');
     }
 
-    const existingUser = await this.userMaster.findFirst({
+    const existingUser = await this.prisma.userMaster.findFirst({
       where: {
         email: normalizedEmail,
         organizationId: data.organizationId,
@@ -110,7 +52,7 @@ export class UsersService {
           })())
         : normalizedEmail;
 
-    const user = await this.userMaster.create({
+    const user = await this.prisma.userMaster.create({
       data: {
         name: data.name,
         email: normalizedEmail,
