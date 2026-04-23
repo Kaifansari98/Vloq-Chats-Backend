@@ -70,6 +70,7 @@ export class OrganizationService {
     });
 
     const { password: _password, ...safeUser } = result.user;
+    void _password;
 
     return {
       message: 'Organization created successfully',

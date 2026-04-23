@@ -71,9 +71,12 @@ export class UsersService {
       },
     });
 
+    const { password: _password, ...safeUser } = user;
+    void _password;
+
     return {
       message: 'User created successfully',
-      data: user,
+      data: safeUser,
     };
   }
 }
