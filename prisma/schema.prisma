@@ -28,7 +28,7 @@ model OrganizationMaster {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   users UserMaster[]
 
@@ -43,7 +43,7 @@ model UserTypeMaster {
   code String @unique // ADMIN, MEMBER
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   users UserMaster[]
 }
@@ -66,7 +66,7 @@ model UserMaster {
   deletedById Int?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   // 🔹 Soft delete
   isDeleted Boolean   @default(false)
@@ -100,7 +100,7 @@ model UserAuthProvider {
   providerId String // google sub / provider unique user id
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   user UserMaster @relation(fields: [userId], references: [id], onDelete: Cascade)
 

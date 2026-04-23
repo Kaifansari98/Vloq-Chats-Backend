@@ -18,6 +18,29 @@ type UserAuthProviderRecord = {
   updatedAt: Date;
 };
 
+type OrganizationMasterRecord = {
+  id: number;
+  uuid: string;
+  name: string;
+  slug: string;
+  email: string | null;
+  countryCode: string | null;
+  logo: string | null;
+  status: string;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type UserTypeMasterRecord = {
+  id: number;
+  uuid: string;
+  name: string;
+  code: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type UserMasterRecord = {
   id: number;
   uuid: string;
@@ -76,6 +99,48 @@ type CreateArgs = {
   };
 };
 
+type FindOrganizationUniqueArgs = {
+  where: {
+    slug: string;
+  };
+};
+
+type CreateOrganizationArgs = {
+  data: {
+    name: string;
+    slug: string;
+    email: string;
+  };
+};
+
+type FindUserTypeUniqueArgs = {
+  where: {
+    code: string;
+  };
+};
+
+type CreateAuthProviderArgs = {
+  data: {
+    userId: number;
+    provider: string;
+    providerId: string;
+  };
+};
+
+type TransactionClient = {
+  organizationMaster: {
+    create(args: CreateOrganizationArgs): Promise<OrganizationMasterRecord>;
+  };
+  userMaster: {
+    create(args: {
+      data: Omit<CreateArgs['data'], 'authProviders'>;
+    }): Promise<UserMasterRecord>;
+  };
+  userAuthProvider: {
+    create(args: CreateAuthProviderArgs): Promise<UserAuthProviderRecord>;
+  };
+};
+
 @Injectable()
 export class PrismaService implements OnModuleDestroy {
   private readonly pool: Pool;
@@ -91,6 +156,41 @@ export class PrismaService implements OnModuleDestroy {
     findFirst: async (args: FindFirstArgs) => this.findFirstUser(args),
     create: async (args: CreateArgs) => this.createUser(args),
   };
+
+  readonly organizationMaster = {
+    findUnique: async (args: FindOrganizationUniqueArgs) =>
+      this.findUniqueOrganization(args),
+    create: async (args: CreateOrganizationArgs) =>
+      this.createOrganization(args),
+  };
+
+  readonly userTypeMaster = {
+    findUnique: async (args: FindUserTypeUniqueArgs) =>
+      this.findUniqueUserType(args),
+  };
+
+  readonly userAuthProvider = {
+    create: async (args: CreateAuthProviderArgs) =>
+      this.createUserAuthProvider(args),
+  };
+
+  async $transaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      const result = await callback(this.createTransactionClient(client));
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 
   async onModuleDestroy() {
     await this.pool.end();
@@ -117,6 +217,59 @@ export class PrismaService implements OnModuleDestroy {
     }
 
     return this.withIncludes(user, include);
+  }
+
+  private async findUniqueOrganization({
+    where,
+  }: FindOrganizationUniqueArgs): Promise<OrganizationMasterRecord | null> {
+    const result = await this.pool.query<OrganizationMasterRecord>(
+      `
+        SELECT *
+        FROM "OrganizationMaster"
+        WHERE slug = $1
+        LIMIT 1
+      `,
+      [where.slug],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
+  private async createOrganization({
+    data,
+  }: CreateOrganizationArgs): Promise<OrganizationMasterRecord> {
+    const result = await this.pool.query<OrganizationMasterRecord>(
+      `
+        INSERT INTO "OrganizationMaster" (
+          name,
+          slug,
+          email,
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *
+      `,
+      [data.name, data.slug, data.email],
+    );
+
+    return result.rows[0];
+  }
+
+  private async findUniqueUserType({
+    where,
+  }: FindUserTypeUniqueArgs): Promise<UserTypeMasterRecord | null> {
+    const result = await this.pool.query<UserTypeMasterRecord>(
+      `
+        SELECT *
+        FROM "UserTypeMaster"
+        WHERE code = $1
+        LIMIT 1
+      `,
+      [where.code],
+    );
+
+    return result.rows[0] ?? null;
   }
 
   private async findFirstUser({
@@ -158,67 +311,129 @@ export class PrismaService implements OnModuleDestroy {
     data,
     include,
   }: CreateArgs): Promise<UserMasterRecord> {
-    const client = await this.pool.connect();
+    const user = await this.createBareUserWithClient(this.pool, data);
+    const authProviderResult = await this.createUserAuthProviderWithClient(
+      this.pool,
+      {
+        data: {
+          userId: user.id,
+          provider: data.authProviders.create.provider,
+          providerId: data.authProviders.create.providerId,
+        },
+      },
+    );
 
-    try {
-      await client.query('BEGIN');
-
-      const createdUserResult = await client.query<UserMasterRecord>(
-        `
-          INSERT INTO "UserMaster" (
-            name,
-            email,
-            password,
-            "organizationId",
-            "userTypeId"
-          )
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING *
-        `,
-        [
-          data.name,
-          data.email,
-          data.password,
-          data.organizationId,
-          data.userTypeId,
-        ],
-      );
-
-      const user = createdUserResult.rows[0];
-
-      const authProviderResult = await client.query<UserAuthProviderRecord>(
-        `
-          INSERT INTO "UserAuthProvider" (
-            "userId",
-            provider,
-            "providerId"
-          )
-          VALUES ($1, $2, $3)
-          RETURNING *
-        `,
-        [
-          user.id,
-          data.authProviders.create.provider,
-          data.authProviders.create.providerId,
-        ],
-      );
-
-      await client.query('COMMIT');
-
-      if (include?.authProviders) {
-        return {
-          ...user,
-          authProviders: authProviderResult.rows,
-        };
-      }
-
-      return user;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    if (include?.authProviders) {
+      return {
+        ...user,
+        authProviders: [authProviderResult],
+      };
     }
+
+    return user;
+  }
+
+  private async createBareUserWithClient(
+    client: Pool | PoolClient,
+    data: CreateArgs['data'],
+  ): Promise<UserMasterRecord> {
+    const createdUserResult = await client.query<UserMasterRecord>(
+      `
+        INSERT INTO "UserMaster" (
+          name,
+          email,
+          password,
+          "organizationId",
+          "userTypeId",
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *
+      `,
+      [
+        data.name,
+        data.email,
+        data.password,
+        data.organizationId,
+        data.userTypeId,
+      ],
+    );
+
+    return createdUserResult.rows[0];
+  }
+
+  private async createUserAuthProvider({
+    data,
+  }: CreateAuthProviderArgs): Promise<UserAuthProviderRecord> {
+    return this.createUserAuthProviderWithClient(this.pool, { data });
+  }
+
+  private async createUserAuthProviderWithClient(
+    client: Pool | PoolClient,
+    { data }: CreateAuthProviderArgs,
+  ): Promise<UserAuthProviderRecord> {
+    const result = await client.query<UserAuthProviderRecord>(
+      `
+        INSERT INTO "UserAuthProvider" (
+          "userId",
+          provider,
+          "providerId",
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *
+      `,
+      [data.userId, data.provider, data.providerId],
+    );
+
+    return result.rows[0];
+  }
+
+  private createTransactionClient(client: PoolClient): TransactionClient {
+    return {
+      organizationMaster: {
+        create: (args) => this.createOrganizationWithClient(client, args),
+      },
+      userMaster: {
+        create: (args) =>
+          this.createBareUserWithClient(client, {
+            ...args.data,
+            authProviders: {
+              create: {
+                provider: 'EMAIL',
+                providerId: args.data.email.toLowerCase(),
+              },
+            },
+          }),
+      },
+      userAuthProvider: {
+        create: (args) => this.createUserAuthProviderWithClient(client, args),
+      },
+    };
+  }
+
+  private async createOrganizationWithClient(
+    client: Pool | PoolClient,
+    { data }: CreateOrganizationArgs,
+  ): Promise<OrganizationMasterRecord> {
+    const result = await client.query<OrganizationMasterRecord>(
+      `
+        INSERT INTO "OrganizationMaster" (
+          name,
+          slug,
+          email,
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *
+      `,
+      [data.name, data.slug, data.email],
+    );
+
+    return result.rows[0];
   }
 
   private async withIncludes(
