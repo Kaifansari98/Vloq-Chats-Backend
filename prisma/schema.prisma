@@ -1,0 +1,115 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model OrganizationMaster {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  name String
+  slug String @unique
+
+  email       String? // optional contact email
+  countryCode String? // e.g. +91, +1
+  logo        String? // S3/Wasabi URL
+
+  status OrgStatus @default(ACTIVE)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users UserMaster[]
+
+  @@index([slug])
+}
+
+model UserTypeMaster {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  name String // admin, member, etc.
+  code String @unique // ADMIN, MEMBER
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users UserMaster[]
+}
+
+model UserMaster {
+  id       Int     @id @default(autoincrement())
+  uuid     String  @unique @default(uuid())
+  name     String
+  email    String
+  password String? // nullable because Google/social login users may not have password
+
+  isActive Boolean @default(true)
+
+  organizationId Int
+  userTypeId     Int
+
+  // 🔹 Audit fields
+  createdById Int?
+  updatedById Int?
+  deletedById Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 🔹 Soft delete
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // 🔹 Relations
+  organization  OrganizationMaster @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userType      UserTypeMaster     @relation(fields: [userTypeId], references: [id])
+  authProviders UserAuthProvider[]
+
+  // 🔹 Self relations (IMPORTANT)
+  createdBy UserMaster? @relation("UserCreatedBy", fields: [createdById], references: [id])
+  updatedBy UserMaster? @relation("UserUpdatedBy", fields: [updatedById], references: [id])
+  deletedBy UserMaster? @relation("UserDeletedBy", fields: [deletedById], references: [id])
+
+  createdUsers UserMaster[] @relation("UserCreatedBy")
+  updatedUsers UserMaster[] @relation("UserUpdatedBy")
+  deletedUsers UserMaster[] @relation("UserDeletedBy")
+
+  @@unique([email, organizationId])
+  @@index([organizationId])
+  @@index([organizationId, isDeleted])
+}
+
+model UserAuthProvider {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  userId     Int
+  provider   String // GOOGLE, EMAIL, MICROSOFT, APPLE
+  providerId String // google sub / provider unique user id
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user UserMaster @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+}
+
+enum OrgStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
