@@ -3,15 +3,17 @@ import {
   Body,
   Controller,
   Get,
+  Param,
   Post,
   Query,
   Req,
+  Res,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { UserMasterRecord } from '../prisma/prisma.service';
@@ -59,12 +61,23 @@ export class ChatsController {
     @Query('page') pageValue?: string,
     @Query('limit') limitValue?: string,
     @Query('search') searchValue?: string,
+    @Query('filter') filterValue?: string,
   ) {
     const page = Math.max(1, Number(pageValue ?? 1) || 1);
     const limit = Math.min(100, Math.max(1, Number(limitValue ?? 25) || 25));
     const search = typeof searchValue === 'string' ? searchValue : '';
+    const normalizedFilter =
+      filterValue === 'UNREAD' || filterValue === 'GROUPS'
+        ? filterValue
+        : 'ALL';
 
-    return this.chatsService.listDirectChats(req.user, page, limit, search);
+    return this.chatsService.listDirectChats(
+      req.user,
+      page,
+      limit,
+      search,
+      normalizedFilter,
+    );
   }
 
   @Post('direct')
@@ -96,6 +109,26 @@ export class ChatsController {
     }
 
     return this.chatsService.listDirectMessages(req.user, participantUserId);
+  }
+
+  @Get('direct/messages/attachments/:attachmentUuid/download')
+  async downloadDirectAttachment(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param('attachmentUuid') attachmentUuid: string,
+  ) {
+    const file = await this.chatsService.downloadDirectAttachment(
+      req.user,
+      attachmentUuid,
+    );
+
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader('Content-Length', String(file.sizeBytes));
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(file.fileName)}"`,
+    );
+    file.body.pipe(res);
   }
 
   @Post('direct/messages')

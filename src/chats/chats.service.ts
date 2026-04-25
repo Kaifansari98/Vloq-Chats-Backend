@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import type { Readable } from 'stream';
 import {
   PrismaService,
   type DirectConversationSummaryRecord,
@@ -50,6 +51,13 @@ type MarkDirectChatReadResponse = {
   message: string;
 };
 
+type DirectAttachmentDownloadResponse = {
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  body: Readable;
+};
+
 @Injectable()
 export class ChatsService {
   constructor(
@@ -63,6 +71,7 @@ export class ChatsService {
     page: number,
     limit: number,
     search?: string,
+    filter: 'ALL' | 'UNREAD' | 'GROUPS' = 'ALL',
   ): Promise<DirectChatsResponse> {
     const { conversations, total } =
       await this.prisma.conversation.findDirectConversationsForUser({
@@ -71,6 +80,7 @@ export class ChatsService {
         page,
         limit,
         search,
+        filter,
       });
 
     return { data: conversations, total, page, limit };
@@ -249,6 +259,30 @@ export class ChatsService {
 
     return {
       message: 'Direct chat marked as read',
+    };
+  }
+
+  async downloadDirectAttachment(
+    user: UserMasterRecord,
+    attachmentUuid: string,
+  ): Promise<DirectAttachmentDownloadResponse> {
+    const attachment = await this.prisma.message.findDirectAttachmentForUser({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      attachmentUuid,
+    });
+
+    if (!attachment) {
+      throw new NotFoundException('Attachment not found');
+    }
+
+    const file = await this.storageService.downloadFile(attachment.url);
+
+    return {
+      fileName: attachment.name,
+      mimeType: attachment.mimeType || file.contentType || 'application/octet-stream',
+      sizeBytes: attachment.sizeBytes || file.contentLength,
+      body: file.body,
     };
   }
 

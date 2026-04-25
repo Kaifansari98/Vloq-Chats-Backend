@@ -87,6 +87,14 @@ export type MessageAttachmentRecord = {
   sizeBytes: number;
 };
 
+export type DirectAttachmentAccessRecord = {
+  uuid: string;
+  name: string;
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
 export type DirectMessageRecord = {
   uuid: string;
   conversationUuid: string;
@@ -217,6 +225,7 @@ type FindDirectConversationsForUserArgs = {
   page: number;
   limit: number;
   search?: string;
+  filter?: 'ALL' | 'UNREAD' | 'GROUPS';
 };
 
 type CreateOrGetDirectConversationArgs = {
@@ -229,6 +238,12 @@ type FindDirectMessagesArgs = {
   organizationId: number;
   currentUserId: number;
   participantUserId: number;
+};
+
+type FindDirectAttachmentForUserArgs = {
+  organizationId: number;
+  currentUserId: number;
+  attachmentUuid: string;
 };
 
 type DirectMessageAttachmentInput = {
@@ -360,10 +375,14 @@ export class PrismaService implements OnModuleDestroy {
 
   readonly message: {
     findDirectMessages(args: FindDirectMessagesArgs): Promise<DirectMessageRecord[]>;
+    findDirectAttachmentForUser(
+      args: FindDirectAttachmentForUserArgs,
+    ): Promise<DirectAttachmentAccessRecord | null>;
     createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
     markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
   } = {
     findDirectMessages: (args) => this.findDirectMessages(args),
+    findDirectAttachmentForUser: (args) => this.findDirectAttachmentForUser(args),
     createDirectMessage: (args) => this.createDirectMessage(args),
     markDirectChatRead: (args) => this.markDirectChatRead(args),
   };
@@ -675,10 +694,15 @@ export class PrismaService implements OnModuleDestroy {
     page,
     limit,
     search,
+    filter = 'ALL',
   }: FindDirectConversationsForUserArgs): Promise<{
     conversations: DirectConversationSummaryRecord[];
     total: number;
   }> {
+    if (filter === 'GROUPS') {
+      return { conversations: [], total: 0 };
+    }
+
     const offset = (page - 1) * limit;
     const values: Array<number | string> = [
       userId,
@@ -687,6 +711,7 @@ export class PrismaService implements OnModuleDestroy {
       offset,
     ];
     let searchClause = '';
+    let filterClause = '';
     const trimmed = search?.trim();
 
     if (trimmed) {
@@ -699,6 +724,10 @@ export class PrismaService implements OnModuleDestroy {
       )`;
     }
 
+    if (filter === 'UNREAD') {
+      filterClause = ' AND COALESCE(unread.unread_count, 0) > 0';
+    }
+
     const result = await this.pool.query<DirectConversationRow>(
       `${this.directConversationSelect(true)}
        WHERE my_participant."userId" = $1
@@ -708,7 +737,7 @@ export class PrismaService implements OnModuleDestroy {
          AND c."isDeleted" = false
          AND other_user."organizationId" = $2
          AND other_user."isDeleted" = false
-         AND other_user."isActive" = true${searchClause}
+         AND other_user."isActive" = true${filterClause}${searchClause}
        ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
        LIMIT $3 OFFSET $4`,
       values,
@@ -1031,6 +1060,41 @@ export class PrismaService implements OnModuleDestroy {
     );
 
     return result.rows.map((row) => this.mapDirectMessageRow(row));
+  }
+
+  private async findDirectAttachmentForUser({
+    organizationId,
+    currentUserId,
+    attachmentUuid,
+  }: FindDirectAttachmentForUserArgs): Promise<DirectAttachmentAccessRecord | null> {
+    const result = await this.pool.query<DirectAttachmentAccessRecord>(
+      `
+        SELECT
+          ma.uuid AS uuid,
+          ma.name AS name,
+          ma.url AS url,
+          ma."mimeType" AS "mimeType",
+          ma.size AS "sizeBytes"
+        FROM "MessageAttachment" ma
+        INNER JOIN "Message" m
+          ON m.id = ma."messageId"
+         AND m."isDeleted" = false
+        INNER JOIN "Conversation" c
+          ON c.id = m."conversationId"
+         AND c.type = 'DIRECT'
+         AND c."isDeleted" = false
+        INNER JOIN "ConversationParticipant" cp
+          ON cp."conversationId" = c.id
+         AND cp."userId" = $1
+         AND cp."isActive" = true
+        WHERE c."organizationId" = $2
+          AND ma.uuid = $3
+        LIMIT 1
+      `,
+      [currentUserId, organizationId, attachmentUuid],
+    );
+
+    return result.rows[0] ?? null;
   }
 
   private async createDirectMessage({

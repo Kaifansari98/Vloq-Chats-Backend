@@ -9,6 +9,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
+import type { Readable } from 'stream';
 
 type MulterFile = {
   buffer: Buffer;
@@ -23,6 +24,12 @@ export type UploadedFile = {
   mimeType: string;
   sizeBytes: number;
   originalName: string;
+};
+
+export type DownloadedFile = {
+  body: Readable;
+  contentType: string | undefined;
+  contentLength: number;
 };
 
 @Injectable()
@@ -110,6 +117,29 @@ export class StorageService {
     return getSignedUrl(this.s3 as unknown as Parameters<typeof getSignedUrl>[0], command, {
       expiresIn: expiresInSeconds,
     });
+  }
+
+  async downloadFile(key: string): Promise<DownloadedFile> {
+    try {
+      const result = await this.s3.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      const body = result.Body as Readable | undefined;
+
+      if (!body) {
+        throw new Error('Empty file body received from storage');
+      }
+
+      return {
+        body,
+        contentType: result.ContentType,
+        contentLength: result.ContentLength ?? 0,
+      };
+    } catch (err) {
+      throw new InternalServerErrorException(
+        `Failed to download file: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async deleteFile(key: string): Promise<void> {
