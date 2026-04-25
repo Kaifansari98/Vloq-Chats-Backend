@@ -7,7 +7,7 @@ export const loginSchema = z.object({
   provider: z.enum(['EMAIL', 'GOOGLE']),
   providerId: z.string().optional(),
 
-  organizationId: z.number(),
+  organizationId: z.number().optional(),
 });
 
 export type LoginDto = z.infer<typeof loginSchema>;

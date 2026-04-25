@@ -18,7 +18,7 @@ type UserAuthProviderRecord = {
   updatedAt: Date;
 };
 
-type OrganizationMasterRecord = {
+export type OrganizationMasterRecord = {
   id: number;
   uuid: string;
   name: string;
@@ -72,7 +72,17 @@ type FindUniqueArgs = {
 type FindFirstArgs = {
   where: {
     email: string;
-    organizationId: number;
+    organizationId?: number;
+    isDeleted?: boolean;
+  };
+  include?: {
+    authProviders?: boolean;
+  };
+};
+
+type FindManyByEmailArgs = {
+  where: {
+    email: string;
     isDeleted?: boolean;
   };
   include?: {
@@ -102,6 +112,12 @@ type CreateArgs = {
 type FindOrganizationUniqueArgs = {
   where: {
     slug: string;
+  };
+};
+
+type FindOrganizationByIdArgs = {
+  where: {
+    id: number;
   };
 };
 
@@ -154,12 +170,16 @@ export class PrismaService implements OnModuleDestroy {
   readonly userMaster = {
     findUnique: async (args: FindUniqueArgs) => this.findUniqueUser(args),
     findFirst: async (args: FindFirstArgs) => this.findFirstUser(args),
+    findManyByEmail: async (args: FindManyByEmailArgs) =>
+      this.findManyUsersByEmail(args),
     create: async (args: CreateArgs) => this.createUser(args),
   };
 
   readonly organizationMaster = {
     findUnique: async (args: FindOrganizationUniqueArgs) =>
       this.findUniqueOrganization(args),
+    findById: async (args: FindOrganizationByIdArgs) =>
+      this.findOrganizationById(args),
     create: async (args: CreateOrganizationArgs) =>
       this.createOrganization(args),
   };
@@ -219,6 +239,16 @@ export class PrismaService implements OnModuleDestroy {
     return this.withIncludes(user, include);
   }
 
+  private async findOrganizationById({
+    where,
+  }: FindOrganizationByIdArgs): Promise<OrganizationMasterRecord | null> {
+    const result = await this.pool.query<OrganizationMasterRecord>(
+      `SELECT * FROM "OrganizationMaster" WHERE id = $1 LIMIT 1`,
+      [where.id],
+    );
+    return result.rows[0] ?? null;
+  }
+
   private async findUniqueOrganization({
     where,
   }: FindOrganizationUniqueArgs): Promise<OrganizationMasterRecord | null> {
@@ -276,11 +306,14 @@ export class PrismaService implements OnModuleDestroy {
     where,
     include,
   }: FindFirstArgs): Promise<UserMasterRecord | null> {
-    const values: Array<string | number | boolean> = [
-      where.email,
-      where.organizationId,
-    ];
+    const values: Array<string | number | boolean> = [where.email];
+    let organizationClause = '';
     let isDeletedClause = '';
+
+    if (typeof where.organizationId === 'number') {
+      values.push(where.organizationId);
+      organizationClause = ` AND "organizationId" = $${values.length}`;
+    }
 
     if (typeof where.isDeleted === 'boolean') {
       values.push(where.isDeleted);
@@ -291,8 +324,7 @@ export class PrismaService implements OnModuleDestroy {
       `
         SELECT *
         FROM "UserMaster"
-        WHERE email = $1
-          AND "organizationId" = $2${isDeletedClause}
+        WHERE email = $1${organizationClause}${isDeletedClause}
         LIMIT 1
       `,
       values,
@@ -305,6 +337,37 @@ export class PrismaService implements OnModuleDestroy {
     }
 
     return this.withIncludes(user, include);
+  }
+
+  private async findManyUsersByEmail({
+    where,
+    include,
+  }: FindManyByEmailArgs): Promise<UserMasterRecord[]> {
+    const values: Array<string | boolean> = [where.email];
+    let isDeletedClause = '';
+
+    if (typeof where.isDeleted === 'boolean') {
+      values.push(where.isDeleted);
+      isDeletedClause = ` AND "isDeleted" = $${values.length}`;
+    }
+
+    const result = await this.pool.query<UserMasterRecord>(
+      `
+        SELECT *
+        FROM "UserMaster"
+        WHERE email = $1${isDeletedClause}
+        ORDER BY id ASC
+      `,
+      values,
+    );
+
+    if (!include?.authProviders) {
+      return result.rows;
+    }
+
+    return Promise.all(
+      result.rows.map((user) => this.withIncludes(user, include)),
+    );
   }
 
   private async createUser({

@@ -6,7 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { LoginDto } from './dto/login.schema';
 import * as bcrypt from 'bcrypt';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type UserMasterRecord } from '../prisma/prisma.service';
 
 @Injectable()
 export class AuthService {
@@ -24,16 +24,38 @@ export class AuthService {
       throw new BadRequestException('Provider ID is required for Google login');
     }
 
-    const user = await this.prisma.userMaster.findFirst({
-      where: {
-        email: normalizedEmail,
-        organizationId,
-        isDeleted: false,
-      },
-      include: {
-        authProviders: true,
-      },
-    });
+    let user: UserMasterRecord | null = null;
+
+    if (typeof organizationId === 'number') {
+      user = await this.prisma.userMaster.findFirst({
+        where: {
+          email: normalizedEmail,
+          organizationId,
+          isDeleted: false,
+        },
+        include: {
+          authProviders: true,
+        },
+      });
+    } else {
+      const users = await this.prisma.userMaster.findManyByEmail({
+        where: {
+          email: normalizedEmail,
+          isDeleted: false,
+        },
+        include: {
+          authProviders: true,
+        },
+      });
+
+      if (users.length > 1) {
+        throw new BadRequestException(
+          'Multiple accounts found for this email. Organization selection is required.',
+        );
+      }
+
+      user = users[0] ?? null;
+    }
 
     if (!user) {
       throw new UnauthorizedException('User not found');
@@ -69,6 +91,11 @@ export class AuthService {
       organizationId: user.organizationId,
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const org = await this.prisma.organizationMaster.findById({
+      where: { id: user.organizationId },
+    });
+
     return {
       message: 'Login successful',
       accessToken: token,
@@ -76,6 +103,10 @@ export class AuthService {
         uuid: user.uuid,
         name: user.name,
         email: user.email,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        organizationName: (org?.name as string | undefined) ?? '',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        organizationEmail: (org?.email as string | null | undefined) ?? '',
       },
     };
   }
