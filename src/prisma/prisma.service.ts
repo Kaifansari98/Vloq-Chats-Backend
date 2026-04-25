@@ -41,6 +41,57 @@ type UserTypeMasterRecord = {
   updatedAt: Date;
 };
 
+type ConversationRecord = {
+  id: number;
+  uuid: string;
+  type: 'DIRECT' | 'GROUP';
+  organizationId: number;
+  name: string | null;
+  description: string | null;
+  avatar: string | null;
+  directKey: string | null;
+  isActive: boolean;
+  createdById: number;
+  createdAt: Date;
+  updatedAt: Date;
+  isDeleted: boolean;
+  deletedAt: Date | null;
+};
+
+export type DirectConversationSummaryRecord = {
+  uuid: string;
+  type: 'DIRECT';
+  createdAt: Date;
+  updatedAt: Date;
+  unreadCount: number;
+  otherParticipant: {
+    id: number;
+    uuid: string;
+    name: string;
+    email: string;
+  };
+  lastMessage: {
+    uuid: string;
+    content: string | null;
+    type: string;
+    createdAt: Date;
+  } | null;
+};
+
+export type DirectMessageRecord = {
+  uuid: string;
+  conversationUuid: string;
+  senderId: number;
+  senderUuid: string;
+  senderName: string;
+  content: string | null;
+  type: string;
+  createdAt: Date;
+  updatedAt: Date;
+  isOwnMessage: boolean;
+  status: 'sent' | 'read';
+};
+
 export type UserMasterRecord = {
   id: number;
   uuid: string;
@@ -150,6 +201,70 @@ type CreateAuthProviderArgs = {
   };
 };
 
+type FindDirectConversationsForUserArgs = {
+  userId: number;
+  organizationId: number;
+  page: number;
+  limit: number;
+  search?: string;
+};
+
+type CreateOrGetDirectConversationArgs = {
+  organizationId: number;
+  currentUserId: number;
+  participantUserId: number;
+};
+
+type FindDirectMessagesArgs = {
+  organizationId: number;
+  currentUserId: number;
+  participantUserId: number;
+};
+
+type CreateDirectMessageArgs = {
+  organizationId: number;
+  currentUserId: number;
+  participantUserId: number;
+  content: string;
+};
+
+type MarkDirectChatReadArgs = {
+  organizationId: number;
+  currentUserId: number;
+  participantUserId: number;
+};
+
+type DirectConversationRow = {
+  conversation_uuid: string;
+  conversation_type: 'DIRECT';
+  conversation_created_at: Date;
+  conversation_updated_at: Date;
+  unread_count: string;
+  other_user_id: number;
+  other_user_uuid: string;
+  other_user_name: string;
+  other_user_email: string;
+  last_message_uuid: string | null;
+  last_message_content: string | null;
+  last_message_type: string | null;
+  last_message_created_at: Date | null;
+  total_count?: string;
+};
+
+type DirectMessageRow = {
+  message_uuid: string;
+  conversation_uuid: string;
+  sender_id: number;
+  sender_uuid: string;
+  sender_name: string;
+  message_content: string | null;
+  message_type: string;
+  message_created_at: Date;
+  message_updated_at: Date;
+  is_own_message: boolean;
+  message_status: string;
+};
+
 type TransactionClient = {
   organizationMaster: {
     create(args: CreateOrganizationArgs): Promise<OrganizationMasterRecord>;
@@ -201,6 +316,25 @@ export class PrismaService implements OnModuleDestroy {
   readonly userAuthProvider = {
     create: async (args: CreateAuthProviderArgs) =>
       this.createUserAuthProvider(args),
+  };
+
+  readonly conversation = {
+    findDirectConversationsForUser: async (
+      args: FindDirectConversationsForUserArgs,
+    ) => this.findDirectConversationsForUser(args),
+    createOrGetDirectConversation: async (
+      args: CreateOrGetDirectConversationArgs,
+    ) => this.createOrGetDirectConversation(args),
+  };
+
+  readonly message: {
+    findDirectMessages(args: FindDirectMessagesArgs): Promise<DirectMessageRecord[]>;
+    createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
+    markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
+  } = {
+    findDirectMessages: async (args) => this.findDirectMessages(args),
+    createDirectMessage: async (args) => this.createDirectMessage(args),
+    markDirectChatRead: async (args) => this.markDirectChatRead(args),
   };
 
   async $transaction<T>(
@@ -504,6 +638,170 @@ export class PrismaService implements OnModuleDestroy {
     return result.rows[0];
   }
 
+  private async findDirectConversationsForUser({
+    userId,
+    organizationId,
+    page,
+    limit,
+    search,
+  }: FindDirectConversationsForUserArgs): Promise<{
+    conversations: DirectConversationSummaryRecord[];
+    total: number;
+  }> {
+    const offset = (page - 1) * limit;
+    const values: Array<number | string> = [
+      userId,
+      organizationId,
+      limit,
+      offset,
+    ];
+    let searchClause = '';
+    const trimmed = search?.trim();
+
+    if (trimmed) {
+      values.push(`%${trimmed}%`);
+      const idx = values.length;
+      searchClause = ` AND (
+        other_user.name ILIKE $${idx}
+        OR other_user.email ILIKE $${idx}
+        OR COALESCE(last_message.content, '') ILIKE $${idx}
+      )`;
+    }
+
+    const result = await this.pool.query<DirectConversationRow>(
+      `${this.directConversationSelect(true)}
+       WHERE my_participant."userId" = $1
+         AND my_participant."isActive" = true
+         AND c."organizationId" = $2
+         AND c.type = 'DIRECT'
+         AND c."isDeleted" = false
+         AND other_user."organizationId" = $2
+         AND other_user."isDeleted" = false
+         AND other_user."isActive" = true${searchClause}
+       ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
+       LIMIT $3 OFFSET $4`,
+      values,
+    );
+
+    const total =
+      result.rows.length > 0
+        ? parseInt(result.rows[0].total_count ?? '0', 10)
+        : 0;
+
+    const conversations = result.rows.map((row) =>
+      this.mapDirectConversationRow(row),
+    );
+
+    return { conversations, total };
+  }
+
+  private async createOrGetDirectConversation({
+    organizationId,
+    currentUserId,
+    participantUserId,
+  }: CreateOrGetDirectConversationArgs): Promise<DirectConversationSummaryRecord> {
+    const directKey = [currentUserId, participantUserId]
+      .sort((a, b) => a - b)
+      .join('_');
+    const existingConversation = await this.findDirectConversationByKey(
+      directKey,
+      currentUserId,
+      organizationId,
+    );
+
+    if (existingConversation) {
+      return existingConversation;
+    }
+
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const conversationResult = await client.query<ConversationRecord>(
+        `
+          INSERT INTO "Conversation" (
+            uuid,
+            type,
+            "organizationId",
+            "directKey",
+            "createdById",
+            "createdAt",
+            "updatedAt"
+          )
+          VALUES (
+            gen_random_uuid(),
+            'DIRECT',
+            $1,
+            $2,
+            $3,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          )
+          RETURNING *
+        `,
+        [organizationId, directKey, currentUserId],
+      );
+
+      const conversation = conversationResult.rows[0];
+
+      await client.query(
+        `
+          INSERT INTO "ConversationParticipant" (
+            uuid,
+            "conversationId",
+            "userId",
+            role,
+            "joinedAt",
+            "isActive",
+            "createdAt",
+            "updatedAt"
+          )
+          VALUES
+            (gen_random_uuid(), $1, $2, 'OWNER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (gen_random_uuid(), $1, $3, 'MEMBER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `,
+        [conversation.id, currentUserId, participantUserId],
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        uuid: conversation.uuid,
+        type: 'DIRECT',
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        unreadCount: 0,
+        otherParticipant:
+          await this.findDirectConversationParticipant(participantUserId),
+        lastMessage: null,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === '23505'
+      ) {
+        const conversation = await this.findDirectConversationByKey(
+          directKey,
+          currentUserId,
+          organizationId,
+        );
+
+        if (conversation) {
+          return conversation;
+        }
+      }
+
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private createTransactionClient(client: PoolClient): TransactionClient {
     return {
       organizationMaster: {
@@ -581,5 +879,431 @@ export class PrismaService implements OnModuleDestroy {
     );
 
     return result.rows;
+  }
+
+  private async findDirectConversationByKey(
+    directKey: string,
+    userId: number,
+    organizationId: number,
+  ): Promise<DirectConversationSummaryRecord | null> {
+    const result = await this.pool.query<DirectConversationRow>(
+      `${this.directConversationSelect(false)}
+       WHERE my_participant."userId" = $1
+         AND my_participant."isActive" = true
+         AND c."organizationId" = $2
+         AND c.type = 'DIRECT'
+         AND c."directKey" = $3
+         AND c."isDeleted" = false
+         AND other_user."organizationId" = $2
+         AND other_user."isDeleted" = false
+         AND other_user."isActive" = true
+       LIMIT 1`,
+      [userId, organizationId, directKey],
+    );
+
+    return result.rows[0] ? this.mapDirectConversationRow(result.rows[0]) : null;
+  }
+
+  private async findDirectConversationParticipant(userId: number): Promise<{
+    id: number;
+    uuid: string;
+    name: string;
+    email: string;
+  }> {
+    const result = await this.pool.query<{
+      id: number;
+      uuid: string;
+      name: string;
+      email: string;
+    }>(
+      `
+        SELECT id, uuid, name, email
+        FROM "UserMaster"
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [userId],
+    );
+
+    return result.rows[0];
+  }
+
+  private async findDirectMessages({
+    organizationId,
+    currentUserId,
+    participantUserId,
+  }: FindDirectMessagesArgs): Promise<DirectMessageRecord[]> {
+    const directKey = [currentUserId, participantUserId]
+      .sort((a, b) => a - b)
+      .join('_');
+
+    const result = await this.pool.query<DirectMessageRow>(
+      `
+        SELECT
+          m.uuid AS message_uuid,
+          c.uuid AS conversation_uuid,
+          sender.id AS sender_id,
+          sender.uuid AS sender_uuid,
+          sender.name AS sender_name,
+          m.content AS message_content,
+          m.type AS message_type,
+          m."createdAt" AS message_created_at,
+          m."updatedAt" AS message_updated_at,
+          (m."senderId" = $1) AS is_own_message,
+          CASE
+            WHEN m."senderId" = $1
+              AND other_participant."lastReadMessageId" IS NOT NULL
+              AND m.id <= other_participant."lastReadMessageId"
+            THEN 'read'
+            ELSE 'sent'
+          END AS message_status
+        FROM "Conversation" c
+        INNER JOIN "ConversationParticipant" my_participant
+          ON my_participant."conversationId" = c.id
+         AND my_participant."userId" = $1
+         AND my_participant."isActive" = true
+        INNER JOIN "ConversationParticipant" other_participant
+          ON other_participant."conversationId" = c.id
+         AND other_participant."userId" = $2
+         AND other_participant."isActive" = true
+        INNER JOIN "Message" m
+          ON m."conversationId" = c.id
+         AND m."isDeleted" = false
+        INNER JOIN "UserMaster" sender
+          ON sender.id = m."senderId"
+        WHERE c."organizationId" = $3
+          AND c.type = 'DIRECT'
+          AND c."directKey" = $4
+          AND c."isDeleted" = false
+        ORDER BY m."createdAt" ASC, m.id ASC
+      `,
+      [currentUserId, participantUserId, organizationId, directKey],
+    );
+
+    return result.rows.map((row) => this.mapDirectMessageRow(row));
+  }
+
+  private async createDirectMessage({
+    organizationId,
+    currentUserId,
+    participantUserId,
+    content,
+  }: CreateDirectMessageArgs): Promise<DirectMessageRecord> {
+    const directKey = [currentUserId, participantUserId]
+      .sort((a, b) => a - b)
+      .join('_');
+
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      let conversationResult = await client.query<{
+        id: number;
+        uuid: string;
+      }>(
+        `
+          SELECT id, uuid
+          FROM "Conversation"
+          WHERE "organizationId" = $1
+            AND type = 'DIRECT'
+            AND "directKey" = $2
+            AND "isDeleted" = false
+          LIMIT 1
+        `,
+        [organizationId, directKey],
+      );
+
+      if (conversationResult.rows.length === 0) {
+        const createdConversationResult = await client.query<ConversationRecord>(
+          `
+            INSERT INTO "Conversation" (
+              uuid,
+              type,
+              "organizationId",
+              "directKey",
+              "createdById",
+              "createdAt",
+              "updatedAt"
+            )
+            VALUES (
+              gen_random_uuid(),
+              'DIRECT',
+              $1,
+              $2,
+              $3,
+              CURRENT_TIMESTAMP,
+              CURRENT_TIMESTAMP
+            )
+            RETURNING *
+          `,
+          [organizationId, directKey, currentUserId],
+        );
+
+        const conversation = createdConversationResult.rows[0];
+
+        await client.query(
+          `
+            INSERT INTO "ConversationParticipant" (
+              uuid,
+              "conversationId",
+              "userId",
+              role,
+              "joinedAt",
+              "isActive",
+              "createdAt",
+              "updatedAt"
+            )
+            VALUES
+              (gen_random_uuid(), $1, $2, 'OWNER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+              (gen_random_uuid(), $1, $3, 'MEMBER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `,
+          [conversation.id, currentUserId, participantUserId],
+        );
+
+        conversationResult = {
+          rows: [{ id: conversation.id, uuid: conversation.uuid }],
+        } as { rows: Array<{ id: number; uuid: string }> };
+      }
+
+      const conversation = conversationResult.rows[0];
+
+      const messageResult = await client.query<DirectMessageRow>(
+        `
+          INSERT INTO "Message" (
+            uuid,
+            "conversationId",
+            "senderId",
+            type,
+            content,
+            "createdAt",
+            "updatedAt"
+          )
+          SELECT
+            gen_random_uuid(),
+            $1,
+            $2,
+            'TEXT',
+            $3,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          RETURNING
+            uuid AS message_uuid,
+            "senderId" AS sender_id,
+            content AS message_content,
+            type AS message_type,
+            "createdAt" AS message_created_at,
+            "updatedAt" AS message_updated_at
+        `,
+        [conversation.id, currentUserId, content],
+      );
+
+      const baseMessage = messageResult.rows[0];
+
+      await client.query(
+        `
+          UPDATE "Conversation"
+          SET "updatedAt" = CURRENT_TIMESTAMP
+          WHERE id = $1
+        `,
+        [conversation.id],
+      );
+
+      await client.query(
+        `
+          UPDATE "ConversationParticipant"
+          SET
+            "lastReadAt" = CURRENT_TIMESTAMP,
+            "lastReadMessageId" = (
+              SELECT id
+              FROM "Message"
+              WHERE uuid = $2
+              LIMIT 1
+            ),
+            "updatedAt" = CURRENT_TIMESTAMP
+          WHERE "conversationId" = $1
+            AND "userId" = $3
+        `,
+        [conversation.id, baseMessage.message_uuid, currentUserId],
+      );
+
+      const sender = await client.query<{
+        id: number;
+        uuid: string;
+        name: string;
+      }>(
+        `
+          SELECT id, uuid, name
+          FROM "UserMaster"
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [currentUserId],
+      );
+
+      await client.query('COMMIT');
+
+      return this.mapDirectMessageRow({
+        ...baseMessage,
+        conversation_uuid: conversation.uuid,
+        sender_uuid: sender.rows[0].uuid,
+        sender_name: sender.rows[0].name,
+        is_own_message: true,
+        message_status: 'sent',
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === '23505'
+      ) {
+        return this.createDirectMessage({
+          organizationId,
+          currentUserId,
+          participantUserId,
+          content,
+        });
+      }
+
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async markDirectChatRead({
+    organizationId,
+    currentUserId,
+    participantUserId,
+  }: MarkDirectChatReadArgs): Promise<void> {
+    const directKey = [currentUserId, participantUserId]
+      .sort((a, b) => a - b)
+      .join('_');
+
+    await this.pool.query(
+      `
+        UPDATE "ConversationParticipant" participant
+        SET
+          "lastReadAt" = CURRENT_TIMESTAMP,
+          "lastReadMessageId" = latest_message.id,
+          "updatedAt" = CURRENT_TIMESTAMP
+        FROM "Conversation" conversation
+        LEFT JOIN LATERAL (
+          SELECT id
+          FROM "Message"
+          WHERE "conversationId" = conversation.id
+            AND "isDeleted" = false
+          ORDER BY "createdAt" DESC, id DESC
+          LIMIT 1
+        ) AS latest_message ON true
+        WHERE participant."conversationId" = conversation.id
+          AND participant."userId" = $1
+          AND participant."isActive" = true
+          AND conversation."organizationId" = $2
+          AND conversation.type = 'DIRECT'
+          AND conversation."directKey" = $3
+          AND conversation."isDeleted" = false
+      `,
+      [currentUserId, organizationId, directKey],
+    );
+  }
+
+  private directConversationSelect(includeTotalCount: boolean): string {
+    return `
+      SELECT
+        c.uuid AS conversation_uuid,
+        c.type AS conversation_type,
+        c."createdAt" AS conversation_created_at,
+        c."updatedAt" AS conversation_updated_at,
+        other_user.id AS other_user_id,
+        other_user.uuid AS other_user_uuid,
+        other_user.name AS other_user_name,
+        other_user.email AS other_user_email,
+        COALESCE(unread.unread_count, 0) AS unread_count,
+        last_message.uuid AS last_message_uuid,
+        last_message.content AS last_message_content,
+        last_message.type AS last_message_type,
+        last_message."createdAt" AS last_message_created_at${
+          includeTotalCount ? ', COUNT(*) OVER() AS total_count' : ''
+        }
+      FROM "ConversationParticipant" my_participant
+      INNER JOIN "Conversation" c
+        ON c.id = my_participant."conversationId"
+      INNER JOIN "ConversationParticipant" other_participant
+        ON other_participant."conversationId" = c.id
+       AND other_participant."userId" <> $1
+       AND other_participant."isActive" = true
+      INNER JOIN "UserMaster" other_user
+        ON other_user.id = other_participant."userId"
+      LEFT JOIN LATERAL (
+        SELECT
+          m.uuid,
+          m.content,
+          m.type,
+          m."createdAt"
+        FROM "Message" m
+        WHERE m."conversationId" = c.id
+          AND m."isDeleted" = false
+        ORDER BY m."createdAt" DESC, m.id DESC
+        LIMIT 1
+      ) AS last_message ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS unread_count
+        FROM "Message" m
+        WHERE m."conversationId" = c.id
+          AND m."isDeleted" = false
+          AND m."senderId" <> $1
+          AND (
+            my_participant."lastReadMessageId" IS NULL
+            OR m.id > my_participant."lastReadMessageId"
+          )
+      ) AS unread ON true
+    `;
+  }
+
+  private mapDirectConversationRow(
+    row: DirectConversationRow,
+  ): DirectConversationSummaryRecord {
+    return {
+      uuid: row.conversation_uuid,
+      type: row.conversation_type,
+      createdAt: row.conversation_created_at,
+      updatedAt: row.conversation_updated_at,
+      unreadCount: parseInt(row.unread_count, 10),
+      otherParticipant: {
+        id: row.other_user_id,
+        uuid: row.other_user_uuid,
+        name: row.other_user_name,
+        email: row.other_user_email,
+      },
+      lastMessage: row.last_message_uuid
+        ? {
+            uuid: row.last_message_uuid,
+            content: row.last_message_content,
+            type: row.last_message_type ?? 'TEXT',
+            createdAt:
+              row.last_message_created_at ?? row.conversation_created_at,
+          }
+        : null,
+    };
+  }
+
+  private mapDirectMessageRow(row: DirectMessageRow): DirectMessageRecord {
+    return {
+      uuid: row.message_uuid,
+      conversationUuid: row.conversation_uuid,
+      senderId: row.sender_id,
+      senderUuid: row.sender_uuid,
+      senderName: row.sender_name,
+      content: row.message_content,
+      type: row.message_type,
+      createdAt: row.message_created_at,
+      updatedAt: row.message_updated_at,
+      isOwnMessage: row.is_own_message,
+      status: row.message_status === 'read' ? 'read' : 'sent',
+    };
   }
 }
