@@ -91,7 +91,7 @@ export class AuthService {
       organizationId: user.organizationId,
     });
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
     const org = await this.prisma.organizationMaster.findById({
       where: { id: user.organizationId },
     });

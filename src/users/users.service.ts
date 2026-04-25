@@ -11,6 +11,27 @@ import * as bcrypt from 'bcrypt';
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async getOrganizationMembers(
+    organizationId: number,
+    page: number,
+    limit: number,
+    search?: string,
+  ) {
+    const { members, total } = await this.prisma.userMaster.findMembersPage({
+      where: { organizationId },
+      page,
+      limit,
+      search,
+    });
+
+    const data = members.map(({ password: _p, ...member }) => {
+      void _p;
+      return member;
+    });
+
+    return { data, total, page, limit };
+  }
+
   async createUser(data: CreateUserDto) {
     const { email, password, provider, providerId } = data;
     const normalizedEmail = email.toLowerCase();

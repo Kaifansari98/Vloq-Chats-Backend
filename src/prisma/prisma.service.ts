@@ -121,6 +121,13 @@ type FindOrganizationByIdArgs = {
   };
 };
 
+type FindMembersPageArgs = {
+  where: { organizationId: number };
+  page: number;
+  limit: number;
+  search?: string;
+};
+
 type CreateOrganizationArgs = {
   data: {
     name: string;
@@ -173,6 +180,8 @@ export class PrismaService implements OnModuleDestroy {
     findManyByEmail: async (args: FindManyByEmailArgs) =>
       this.findManyUsersByEmail(args),
     create: async (args: CreateArgs) => this.createUser(args),
+    findMembersPage: async (args: FindMembersPageArgs) =>
+      this.findMembersPage(args),
   };
 
   readonly organizationMaster = {
@@ -237,6 +246,44 @@ export class PrismaService implements OnModuleDestroy {
     }
 
     return this.withIncludes(user, include);
+  }
+
+  private async findMembersPage({
+    where,
+    page,
+    limit,
+    search,
+  }: FindMembersPageArgs): Promise<{
+    members: UserMasterRecord[];
+    total: number;
+  }> {
+    const offset = (page - 1) * limit;
+    type Row = UserMasterRecord & { total_count: string };
+    const values: (string | number)[] = [where.organizationId, limit, offset];
+    let searchClause = '';
+    const trimmed = search?.trim();
+    if (trimmed) {
+      values.push(`%${trimmed}%`);
+      const idx = values.length;
+      searchClause = ` AND (name ILIKE $${idx} OR email ILIKE $${idx})`;
+    }
+    const result = await this.pool.query<Row>(
+      `SELECT *, COUNT(*) OVER() AS total_count
+       FROM "UserMaster"
+       WHERE "organizationId" = $1 AND "isDeleted" = false${searchClause}
+       ORDER BY name ASC
+       LIMIT $2 OFFSET $3`,
+      values,
+    );
+    const total =
+      result.rows.length > 0 ? parseInt(result.rows[0].total_count, 10) : 0;
+    const members: UserMasterRecord[] = result.rows.map(
+      ({ total_count: _tc, ...m }) => {
+        void _tc;
+        return m as UserMasterRecord;
+      },
+    );
+    return { members, total };
   }
 
   private async findOrganizationById({

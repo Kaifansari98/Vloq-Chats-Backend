@@ -34,6 +34,23 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post('members')
+  getMembers(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { page?: number; limit?: number; search?: string },
+  ) {
+    const page = Math.max(1, Number(body.page ?? 1) || 1);
+    const limit = Math.min(100, Math.max(1, Number(body.limit ?? 25) || 25));
+    const search = typeof body.search === 'string' ? body.search : '';
+    return this.usersService.getOrganizationMembers(
+      req.user.organizationId,
+      page,
+      limit,
+      search,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('me')
   getProfile(@Req() req: AuthenticatedRequest) {
     return {
