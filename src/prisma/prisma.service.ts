@@ -318,13 +318,14 @@ export class PrismaService implements OnModuleDestroy {
     const result = await this.pool.query<OrganizationMasterRecord>(
       `
         INSERT INTO "OrganizationMaster" (
+          uuid,
           name,
           slug,
           email,
           "createdAt",
           "updatedAt"
         )
-        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (gen_random_uuid(), $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING *
       `,
       [data.name, data.slug, data.email],
@@ -450,6 +451,7 @@ export class PrismaService implements OnModuleDestroy {
     const createdUserResult = await client.query<UserMasterRecord>(
       `
         INSERT INTO "UserMaster" (
+          uuid,
           name,
           email,
           password,
@@ -458,7 +460,7 @@ export class PrismaService implements OnModuleDestroy {
           "createdAt",
           "updatedAt"
         )
-        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING *
       `,
       [
@@ -486,13 +488,14 @@ export class PrismaService implements OnModuleDestroy {
     const result = await client.query<UserAuthProviderRecord>(
       `
         INSERT INTO "UserAuthProvider" (
+          uuid,
           "userId",
           provider,
           "providerId",
           "createdAt",
           "updatedAt"
         )
-        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (gen_random_uuid(), $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING *
       `,
       [data.userId, data.provider, data.providerId],
@@ -531,13 +534,14 @@ export class PrismaService implements OnModuleDestroy {
     const result = await client.query<OrganizationMasterRecord>(
       `
         INSERT INTO "OrganizationMaster" (
+          uuid,
           name,
           slug,
           email,
           "createdAt",
           "updatedAt"
         )
-        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (gen_random_uuid(), $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING *
       `,
       [data.name, data.slug, data.email],

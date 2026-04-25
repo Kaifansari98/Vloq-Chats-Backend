@@ -12,6 +12,51 @@ datasource db {
   provider = "postgresql"
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Enums
+// ─────────────────────────────────────────────────────────────
+
+enum OrgStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum ConversationType {
+  DIRECT
+  GROUP
+}
+
+enum ConversationRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// TEXT   – plain text (content required)
+// IMAGE/FILE/AUDIO/VIDEO – attachment-only (content optional caption)
+// SYSTEM – server-generated event ("Alice added Bob", "Group name changed")
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  AUDIO
+  VIDEO
+  SYSTEM
+}
+
+enum AttachmentType {
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  OTHER
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Existing models
+// ─────────────────────────────────────────────────────────────
+
 model OrganizationMaster {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
@@ -30,7 +75,8 @@ model OrganizationMaster {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  users UserMaster[]
+  users         UserMaster[]
+  conversations Conversation[]
 
   @@index([slug])
 }
@@ -72,12 +118,12 @@ model UserMaster {
   isDeleted Boolean   @default(false)
   deletedAt DateTime?
 
-  // 🔹 Relations
+  // 🔹 Core relations
   organization  OrganizationMaster @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userType      UserTypeMaster     @relation(fields: [userTypeId], references: [id])
   authProviders UserAuthProvider[]
 
-  // 🔹 Self relations (IMPORTANT)
+  // 🔹 Self relations
   createdBy UserMaster? @relation("UserCreatedBy", fields: [createdById], references: [id])
   updatedBy UserMaster? @relation("UserUpdatedBy", fields: [updatedById], references: [id])
   deletedBy UserMaster? @relation("UserDeletedBy", fields: [deletedById], references: [id])
@@ -85,6 +131,14 @@ model UserMaster {
   createdUsers UserMaster[] @relation("UserCreatedBy")
   updatedUsers UserMaster[] @relation("UserUpdatedBy")
   deletedUsers UserMaster[] @relation("UserDeletedBy")
+
+  // 🔹 Chat relations (back-relations — no columns added here)
+  createdConversations    Conversation[]          @relation("ConversationCreatedBy")
+  conversationParticipant ConversationParticipant[]
+  sentMessages            Message[]               @relation("MessageSender")
+  deletedMessages         Message[]               @relation("MessageDeletedBy")
+  mentions                MessageMention[]
+  reactions               MessageReaction[]
 
   @@unique([email, organizationId])
   @@index([organizationId])
@@ -108,8 +162,173 @@ model UserAuthProvider {
   @@index([userId])
 }
 
-enum OrgStatus {
-  ACTIVE
-  INACTIVE
-  SUSPENDED
+// ─────────────────────────────────────────────────────────────
+//  Chat models
+// ─────────────────────────────────────────────────────────────
+
+// Single table for both 1-to-1 (DIRECT) and group chats.
+// directKey = "{minUserId}_{maxUserId}" — unique per org pair,
+// preventing duplicate DM conversations.
+model Conversation {
+  id             Int              @id @default(autoincrement())
+  uuid           String           @unique @default(uuid())
+  type           ConversationType
+  organizationId Int
+
+  // group-only (null for DIRECT)
+  name        String?
+  description String?
+  avatar      String?
+
+  // DIRECT-only: sorted pair key to enforce exactly-one-DM rule
+  directKey String? @unique
+
+  isActive    Boolean   @default(true)
+  createdById Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+  isDeleted   Boolean   @default(false)
+  deletedAt   DateTime?
+
+  organization OrganizationMaster        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    UserMaster                @relation("ConversationCreatedBy", fields: [createdById], references: [id])
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([organizationId])
+  @@index([organizationId, type])
+}
+
+// Tracks who is in a conversation, their role, and their read cursor.
+model ConversationParticipant {
+  id             Int              @id @default(autoincrement())
+  uuid           String           @unique @default(uuid())
+  conversationId Int
+  userId         Int
+  role           ConversationRole @default(MEMBER)
+
+  joinedAt DateTime  @default(now())
+  leftAt   DateTime?
+  isActive Boolean   @default(true)
+
+  // Read cursor — used to compute unread count without a per-message
+  // receipt table: COUNT(*) WHERE id > lastReadMessageId AND senderId != me
+  lastReadAt        DateTime?
+  lastReadMessageId Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user            UserMaster   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastReadMessage Message?     @relation("LastReadMessage", fields: [lastReadMessageId], references: [id])
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@index([conversationId])
+}
+
+model Message {
+  id             Int         @id @default(autoincrement())
+  uuid           String      @unique @default(uuid())
+  conversationId Int
+  senderId       Int
+  type           MessageType @default(TEXT)
+
+  // null for pure-attachment messages; optional caption otherwise
+  content String?
+
+  // reply-to: null = top-level message, non-null = reply in thread
+  parentMessageId Int?
+
+  // extensible bag: link previews, poll data, system event payload, etc.
+  metadata Json?
+
+  isEdited  Boolean   @default(false)
+  editedAt  DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+  deletedById Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       UserMaster   @relation("MessageSender", fields: [senderId], references: [id])
+  deletedBy    UserMaster?  @relation("MessageDeletedBy", fields: [deletedById], references: [id])
+
+  // self-referential thread chain
+  parent  Message?  @relation("MessageThread", fields: [parentMessageId], references: [id])
+  replies Message[] @relation("MessageThread")
+
+  attachments             MessageAttachment[]
+  mentions                MessageMention[]
+  reactions               MessageReaction[]
+  lastReadByParticipants  ConversationParticipant[] @relation("LastReadMessage")
+
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@index([senderId])
+  @@index([parentMessageId])
+  @@index([conversationId, isDeleted])
+}
+
+// One row per file/image/video/audio attached to a message.
+model MessageAttachment {
+  id        Int            @id @default(autoincrement())
+  uuid      String         @unique @default(uuid())
+  messageId Int
+  type      AttachmentType
+  name      String // original filename
+  url       String // storage URL (S3 / Wasabi / R2)
+  mimeType  String
+  size      BigInt // bytes
+
+  // image / video
+  width  Int?
+  height Int?
+
+  // audio / video duration in seconds
+  duration Int?
+
+  thumbnailUrl String?
+
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+// Stores the exact character position of each @mention so the
+// client can highlight without re-parsing the content string.
+model MessageMention {
+  id              Int @id @default(autoincrement())
+  messageId       Int
+  mentionedUserId Int
+  offset          Int // char index in content
+  length          Int // byte length of the @handle
+
+  createdAt DateTime @default(now())
+
+  message       Message    @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  mentionedUser UserMaster @relation(fields: [mentionedUserId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([mentionedUserId])
+}
+
+// Emoji reactions — unique per (message, user, emoji) triple.
+model MessageReaction {
+  id        Int    @id @default(autoincrement())
+  messageId Int
+  userId    Int
+  emoji     String // e.g. "👍" "❤️" "😂"
+
+  createdAt DateTime @default(now())
+
+  message Message    @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    UserMaster @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
 }
