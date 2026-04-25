@@ -3,16 +3,27 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import {
   PrismaService,
   type DirectConversationSummaryRecord,
   type DirectMessageRecord,
+  type MessageAttachmentRecord,
   type UserMasterRecord,
 } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { ChatsGateway } from './chats.gateway';
 import type { CreateDirectChatDto } from './dto/create-direct-chat.schema';
 import type { CreateDirectMessageDto } from './dto/create-direct-message.schema';
 import type { MarkDirectChatReadDto } from './dto/mark-direct-chat-read.schema';
+import type { UploadDirectMessageDto } from './dto/upload-direct-message.schema';
+
+type UploadFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+  size: number;
+};
 
 type DirectChatsResponse = {
   data: DirectConversationSummaryRecord[];
@@ -44,6 +55,7 @@ export class ChatsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly chatsGateway: ChatsGateway,
+    private readonly storageService: StorageService,
   ) {}
 
   async listDirectChats(
@@ -110,7 +122,7 @@ export class ChatsService {
       participantUserId,
     });
 
-    return { data: messages };
+    return { data: await this.enrichWithSignedUrls(messages) };
   }
 
   async createDirectMessage(
@@ -130,11 +142,90 @@ export class ChatsService {
       content: data.content.trim(),
     });
 
+    // Text messages have no attachments — no enrichment needed
     this.chatsGateway.emitDirectMessage(message, data.participantUserId);
 
     return {
       message: 'Message sent successfully',
       data: message,
+    };
+  }
+
+  async uploadDirectMessage(
+    user: UserMasterRecord,
+    data: UploadDirectMessageDto,
+    files: UploadFile[],
+  ): Promise<DirectMessageResponse> {
+    if (data.participantUserId === user.id) {
+      throw new BadRequestException('You cannot send a message to yourself');
+    }
+
+    if (!files || files.length === 0) {
+      throw new BadRequestException('At least one file is required');
+    }
+
+    if (files.length > 5) {
+      throw new BadRequestException('Maximum 5 files allowed per message');
+    }
+
+    const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
+
+    for (const file of files) {
+      if (!this.storageService.isAllowedMimeType(file.mimetype)) {
+        throw new BadRequestException(
+          `File type "${file.mimetype}" is not allowed`,
+        );
+      }
+      if (file.size > this.storageService.maxFileSize) {
+        throw new BadRequestException(
+          `"${file.originalname}" exceeds the ${maxMb} MB size limit`,
+        );
+      }
+    }
+
+    await this.ensureDirectParticipant(user, data.participantUserId);
+
+    // Wasabi folder: direct/{min}_{max} — matches the directKey convention
+    const [a, b] = [user.id, data.participantUserId].sort((x, y) => x - y);
+    const folder = `direct/${a}_${b}`;
+
+    const uploaded = await Promise.all(
+      files.map((f) => this.storageService.uploadFile(f, folder)),
+    );
+
+    const allImages = files.every((f) =>
+      this.storageService.isImageMimeType(f.mimetype),
+    );
+    const messageType = allImages ? 'IMAGE' : 'FILE';
+
+    const attachmentInputs = uploaded.map((uf, i) => ({
+      uuid: randomUUID(),
+      // files and uploaded have identical length — index is always valid
+      attachmentType: this.storageService.isImageMimeType(files[i].mimetype)
+        ? ('IMAGE' as const)
+        : ('DOCUMENT' as const),
+      name: uf.originalName,
+      key: uf.key,
+      mimeType: uf.mimeType,
+      sizeBytes: uf.sizeBytes,
+    }));
+
+    const message = await this.prisma.message.createDirectMessage({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      participantUserId: data.participantUserId,
+      content: data.content?.trim() || null,
+      messageType,
+      attachments: attachmentInputs,
+    });
+
+    const [enriched] = await this.enrichWithSignedUrls([message]);
+
+    this.chatsGateway.emitDirectMessage(enriched, data.participantUserId);
+
+    return {
+      message: 'Message sent successfully',
+      data: enriched,
     };
   }
 
@@ -159,6 +250,31 @@ export class ChatsService {
     return {
       message: 'Direct chat marked as read',
     };
+  }
+
+  private async enrichWithSignedUrls(
+    messages: DirectMessageRecord[],
+  ): Promise<DirectMessageRecord[]> {
+    return Promise.all(
+      messages.map(async (msg): Promise<DirectMessageRecord> => {
+        // attachments flows through any-heavy prisma internals; cast is correct at runtime
+        /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+        const atts = msg.attachments as MessageAttachmentRecord[];
+        if (atts.length === 0) return msg;
+        const enrichedAtts: MessageAttachmentRecord[] = await Promise.all(
+          atts.map(
+            async (
+              att: MessageAttachmentRecord,
+            ): Promise<MessageAttachmentRecord> => ({
+              ...att,
+              url: await this.storageService.getSignedUrl(att.url as string),
+            }),
+          ),
+        );
+        /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+        return { ...msg, attachments: enrichedAtts };
+      }),
+    );
   }
 
   private async ensureDirectParticipant(

@@ -78,6 +78,15 @@ export type DirectConversationSummaryRecord = {
   } | null;
 };
 
+export type MessageAttachmentRecord = {
+  uuid: string;
+  attachmentType: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'OTHER';
+  name: string;
+  url: string; // Wasabi key — replaced with signed URL by ChatsService before serving
+  mimeType: string;
+  sizeBytes: number;
+};
+
 export type DirectMessageRecord = {
   uuid: string;
   conversationUuid: string;
@@ -90,6 +99,7 @@ export type DirectMessageRecord = {
   updatedAt: Date;
   isOwnMessage: boolean;
   status: 'sent' | 'read';
+  attachments: MessageAttachmentRecord[];
 };
 
 export type UserMasterRecord = {
@@ -221,11 +231,22 @@ type FindDirectMessagesArgs = {
   participantUserId: number;
 };
 
+type DirectMessageAttachmentInput = {
+  uuid: string;
+  attachmentType: 'IMAGE' | 'DOCUMENT';
+  name: string;
+  key: string; // Wasabi key — stored in the url column of MessageAttachment
+  mimeType: string;
+  sizeBytes: number;
+};
+
 type CreateDirectMessageArgs = {
   organizationId: number;
   currentUserId: number;
   participantUserId: number;
-  content: string;
+  content: string | null;
+  messageType?: 'TEXT' | 'IMAGE' | 'FILE';
+  attachments?: DirectMessageAttachmentInput[];
 };
 
 type MarkDirectChatReadArgs = {
@@ -251,6 +272,15 @@ type DirectConversationRow = {
   total_count?: string;
 };
 
+type AttachmentJsonRow = {
+  uuid: string;
+  type: string;
+  name: string;
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
 type DirectMessageRow = {
   message_uuid: string;
   conversation_uuid: string;
@@ -263,6 +293,7 @@ type DirectMessageRow = {
   message_updated_at: Date;
   is_own_message: boolean;
   message_status: string;
+  message_attachments: AttachmentJsonRow[];
 };
 
 type TransactionClient = {
@@ -332,9 +363,9 @@ export class PrismaService implements OnModuleDestroy {
     createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
     markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
   } = {
-    findDirectMessages: async (args) => this.findDirectMessages(args),
-    createDirectMessage: async (args) => this.createDirectMessage(args),
-    markDirectChatRead: async (args) => this.markDirectChatRead(args),
+    findDirectMessages: (args) => this.findDirectMessages(args),
+    createDirectMessage: (args) => this.createDirectMessage(args),
+    markDirectChatRead: (args) => this.markDirectChatRead(args),
   };
 
   async $transaction<T>(
@@ -940,15 +971,15 @@ export class PrismaService implements OnModuleDestroy {
     const result = await this.pool.query<DirectMessageRow>(
       `
         SELECT
-          m.uuid AS message_uuid,
-          c.uuid AS conversation_uuid,
-          sender.id AS sender_id,
-          sender.uuid AS sender_uuid,
-          sender.name AS sender_name,
-          m.content AS message_content,
-          m.type AS message_type,
-          m."createdAt" AS message_created_at,
-          m."updatedAt" AS message_updated_at,
+          m.uuid         AS message_uuid,
+          c.uuid         AS conversation_uuid,
+          sender.id      AS sender_id,
+          sender.uuid    AS sender_uuid,
+          sender.name    AS sender_name,
+          m.content      AS message_content,
+          m.type         AS message_type,
+          m."createdAt"  AS message_created_at,
+          m."updatedAt"  AS message_updated_at,
           (m."senderId" = $1) AS is_own_message,
           CASE
             WHEN m."senderId" = $1
@@ -956,7 +987,20 @@ export class PrismaService implements OnModuleDestroy {
               AND m.id <= other_participant."lastReadMessageId"
             THEN 'read'
             ELSE 'sent'
-          END AS message_status
+          END AS message_status,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'uuid',      ma.uuid,
+                'type',      ma.type,
+                'name',      ma.name,
+                'url',       ma.url,
+                'mimeType',  ma."mimeType",
+                'sizeBytes', ma.size
+              ) ORDER BY ma.id ASC
+            ) FILTER (WHERE ma.id IS NOT NULL),
+            '[]'::json
+          ) AS message_attachments
         FROM "Conversation" c
         INNER JOIN "ConversationParticipant" my_participant
           ON my_participant."conversationId" = c.id
@@ -971,10 +1015,16 @@ export class PrismaService implements OnModuleDestroy {
          AND m."isDeleted" = false
         INNER JOIN "UserMaster" sender
           ON sender.id = m."senderId"
+        LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
         WHERE c."organizationId" = $3
           AND c.type = 'DIRECT'
           AND c."directKey" = $4
           AND c."isDeleted" = false
+        GROUP BY
+          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
+          c.uuid,
+          sender.id, sender.uuid, sender.name,
+          other_participant."lastReadMessageId"
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, participantUserId, organizationId, directKey],
@@ -988,6 +1038,8 @@ export class PrismaService implements OnModuleDestroy {
     currentUserId,
     participantUserId,
     content,
+    messageType = 'TEXT',
+    attachments = [],
   }: CreateDirectMessageArgs): Promise<DirectMessageRecord> {
     const directKey = [currentUserId, participantUserId]
       .sort((a, b) => a - b)
@@ -1068,7 +1120,16 @@ export class PrismaService implements OnModuleDestroy {
 
       const conversation = conversationResult.rows[0];
 
-      const messageResult = await client.query<DirectMessageRow>(
+      type InsertedMessageRow = {
+        message_id: number;
+        message_uuid: string;
+        sender_id: number;
+        message_content: string | null;
+        message_type: string;
+        message_created_at: Date;
+        message_updated_at: Date;
+      };
+      const messageResult = await client.query<InsertedMessageRow>(
         `
           INSERT INTO "Message" (
             uuid,
@@ -1079,15 +1140,17 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt",
             "updatedAt"
           )
-          SELECT
+          VALUES (
             gen_random_uuid(),
             $1,
             $2,
-            'TEXT',
+            $4,
             $3,
             CURRENT_TIMESTAMP,
             CURRENT_TIMESTAMP
+          )
           RETURNING
+            id AS message_id,
             uuid AS message_uuid,
             "senderId" AS sender_id,
             content AS message_content,
@@ -1095,10 +1158,31 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt" AS message_created_at,
             "updatedAt" AS message_updated_at
         `,
-        [conversation.id, currentUserId, content],
+        [conversation.id, currentUserId, content, messageType],
       );
 
       const baseMessage = messageResult.rows[0];
+
+      // Insert attachments if any
+      for (const att of attachments) {
+        await client.query(
+          `
+            INSERT INTO "MessageAttachment" (
+              uuid, "messageId", type, name, url, "mimeType", size, "createdAt"
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+          `,
+          [
+            att.uuid,
+            baseMessage.message_id,
+            att.attachmentType,
+            att.name,
+            att.key,
+            att.mimeType,
+            att.sizeBytes,
+          ],
+        );
+      }
 
       await client.query(
         `
@@ -1114,17 +1198,12 @@ export class PrismaService implements OnModuleDestroy {
           UPDATE "ConversationParticipant"
           SET
             "lastReadAt" = CURRENT_TIMESTAMP,
-            "lastReadMessageId" = (
-              SELECT id
-              FROM "Message"
-              WHERE uuid = $2
-              LIMIT 1
-            ),
+            "lastReadMessageId" = $2,
             "updatedAt" = CURRENT_TIMESTAMP
           WHERE "conversationId" = $1
             AND "userId" = $3
         `,
-        [conversation.id, baseMessage.message_uuid, currentUserId],
+        [conversation.id, baseMessage.message_id, currentUserId],
       );
 
       const sender = await client.query<{
@@ -1150,6 +1229,14 @@ export class PrismaService implements OnModuleDestroy {
         sender_name: sender.rows[0].name,
         is_own_message: true,
         message_status: 'sent',
+        message_attachments: attachments.map((a) => ({
+          uuid: a.uuid,
+          type: a.attachmentType,
+          name: a.name,
+          url: a.key,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+        })),
       });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1165,6 +1252,8 @@ export class PrismaService implements OnModuleDestroy {
           currentUserId,
           participantUserId,
           content,
+          messageType,
+          attachments,
         });
       }
 
@@ -1304,6 +1393,14 @@ export class PrismaService implements OnModuleDestroy {
       updatedAt: row.message_updated_at,
       isOwnMessage: row.is_own_message,
       status: row.message_status === 'read' ? 'read' : 'sent',
+      attachments: (row.message_attachments ?? []).map((a) => ({
+        uuid: a.uuid,
+        attachmentType: a.type as MessageAttachmentRecord['attachmentType'],
+        name: a.name,
+        url: a.url,
+        mimeType: a.mimeType,
+        sizeBytes: typeof a.sizeBytes === 'string' ? parseInt(a.sizeBytes, 10) : a.sizeBytes,
+      })),
     };
   }
 }

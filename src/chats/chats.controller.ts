@@ -6,9 +6,13 @@ import {
   Post,
   Query,
   Req,
+  UploadedFiles,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
+import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { UserMasterRecord } from '../prisma/prisma.service';
 import {
@@ -23,11 +27,26 @@ import {
   markDirectChatReadSchema,
   type MarkDirectChatReadDto,
 } from './dto/mark-direct-chat-read.schema';
+import {
+  uploadDirectMessageSchema,
+  type UploadDirectMessageDto,
+} from './dto/upload-direct-message.schema';
 import { ChatsService } from './chats.service';
 
 type AuthenticatedRequest = Request & {
   user: UserMasterRecord;
 };
+
+type UploadFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+  size: number;
+};
+
+const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB ?? '10');
+const MAX_FILE_SIZE_BYTES =
+  (Number.isFinite(maxFileSizeMb) ? maxFileSizeMb : 10) * 1024 * 1024;
 
 @Controller('chats')
 @UseGuards(JwtAuthGuard)
@@ -92,6 +111,30 @@ export class ChatsController {
 
     const data: CreateDirectMessageDto = result.data;
     return this.chatsService.createDirectMessage(req.user, data);
+  }
+
+  @Post('direct/messages/upload')
+  @UseInterceptors(
+    FilesInterceptor('files', 5, {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_FILE_SIZE_BYTES },
+    }),
+  )
+  async uploadDirectMessage(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: unknown,
+    @UploadedFiles() files: unknown,
+  ) {
+    const result = uploadDirectMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: UploadDirectMessageDto = result.data;
+    const uploadedFiles = (Array.isArray(files) ? files : []) as UploadFile[];
+
+    return this.chatsService.uploadDirectMessage(req.user, data, uploadedFiles);
   }
 
   @Post('direct/messages/read')

@@ -10,7 +10,6 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 
-// Inline type to avoid relying on the Express.Multer global namespace augmentation
 type MulterFile = {
   buffer: Buffer;
   originalname: string;
@@ -31,6 +30,8 @@ export class StorageService {
   private readonly s3: S3Client;
   private readonly bucket: string;
   private readonly maxFileSizeBytes: number;
+  private readonly allowedImageTypes: string[];
+  private readonly allowedDocTypes: string[];
 
   constructor(private readonly config: ConfigService) {
     const region = this.config.getOrThrow<string>('WASABI_REGION');
@@ -38,8 +39,21 @@ export class StorageService {
     const accessKeyId = this.config.getOrThrow<string>('WASABI_ACCESS_KEY_ID');
     const secretAccessKey = this.config.getOrThrow<string>('WASABI_SECRET_ACCESS_KEY');
     this.bucket = this.config.getOrThrow<string>('WASABI_BUCKET_NAME');
+
     const maxMb = Number(this.config.get<string>('MAX_FILE_SIZE_MB') ?? '10');
     this.maxFileSizeBytes = (Number.isFinite(maxMb) ? maxMb : 10) * 1024 * 1024;
+
+    const parseList = (key: string, fallback: string) =>
+      (this.config.get<string>(key) ?? fallback)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    this.allowedImageTypes = parseList('ALLOWED_IMAGE_TYPES', 'image/jpeg,image/png');
+    this.allowedDocTypes = parseList(
+      'ALLOWED_DOC_TYPES',
+      'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
 
     this.s3 = new S3Client({
       region,
@@ -51,6 +65,14 @@ export class StorageService {
 
   get maxFileSize(): number {
     return this.maxFileSizeBytes;
+  }
+
+  isAllowedMimeType(mimeType: string): boolean {
+    return this.allowedImageTypes.includes(mimeType) || this.allowedDocTypes.includes(mimeType);
+  }
+
+  isImageMimeType(mimeType: string): boolean {
+    return this.allowedImageTypes.includes(mimeType);
   }
 
   async uploadFile(file: MulterFile, folder: string): Promise<UploadedFile> {
@@ -82,7 +104,7 @@ export class StorageService {
     };
   }
 
-  async getSignedUrl(key: string, expiresInSeconds = 3600): Promise<string> {
+  async getSignedUrl(key: string, expiresInSeconds = 86400): Promise<string> {
     const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
     // Double cast required: pnpm resolves separate copies of @smithy internals across SDK packages
     return getSignedUrl(this.s3 as unknown as Parameters<typeof getSignedUrl>[0], command, {
