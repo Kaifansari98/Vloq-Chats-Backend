@@ -78,6 +78,27 @@ export type DirectConversationSummaryRecord = {
   } | null;
 };
 
+export type GroupConversationSummaryRecord = {
+  uuid: string;
+  type: 'GROUP';
+  name: string;
+  createdAt: Date;
+  updatedAt: Date;
+  unreadCount: number;
+  participants: Array<{
+    id: number;
+    uuid: string;
+    name: string;
+    email: string;
+  }>;
+  lastMessage: {
+    uuid: string;
+    content: string | null;
+    type: string;
+    createdAt: Date;
+  } | null;
+};
+
 export type MessageAttachmentRecord = {
   uuid: string;
   attachmentType: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'OTHER';
@@ -228,6 +249,21 @@ type FindDirectConversationsForUserArgs = {
   filter?: 'ALL' | 'UNREAD' | 'GROUPS';
 };
 
+type FindGroupConversationsForUserArgs = {
+  userId: number;
+  organizationId: number;
+  page: number;
+  limit: number;
+  search?: string;
+};
+
+type CreateGroupConversationArgs = {
+  organizationId: number;
+  creatorId: number;
+  name: string;
+  memberIds: number[];
+};
+
 type CreateOrGetDirectConversationArgs = {
   organizationId: number;
   currentUserId: number;
@@ -270,6 +306,21 @@ type MarkDirectChatReadArgs = {
   participantUserId: number;
 };
 
+type FindGroupMessagesArgs = {
+  conversationUuid: string;
+  currentUserId: number;
+  organizationId: number;
+};
+
+type CreateGroupMessageArgs = {
+  conversationUuid: string;
+  currentUserId: number;
+  organizationId: number;
+  content: string | null;
+  messageType?: 'TEXT' | 'IMAGE' | 'FILE';
+  attachments?: DirectMessageAttachmentInput[];
+};
+
 type DirectConversationRow = {
   conversation_uuid: string;
   conversation_type: 'DIRECT';
@@ -284,6 +335,20 @@ type DirectConversationRow = {
   last_message_content: string | null;
   last_message_type: string | null;
   last_message_created_at: Date | null;
+  total_count?: string;
+};
+
+type GroupConversationRow = {
+  conversation_uuid: string;
+  conversation_name: string | null;
+  conversation_created_at: Date;
+  conversation_updated_at: Date;
+  unread_count: string;
+  last_message_uuid: string | null;
+  last_message_content: string | null;
+  last_message_type: string | null;
+  last_message_created_at: Date | null;
+  participants_json: Array<{ id: number; uuid: string; name: string; email: string }> | null;
   total_count?: string;
 };
 
@@ -371,6 +436,9 @@ export class PrismaService implements OnModuleDestroy {
     createOrGetDirectConversation: async (
       args: CreateOrGetDirectConversationArgs,
     ) => this.createOrGetDirectConversation(args),
+    createGroupConversation: async (
+      args: CreateGroupConversationArgs,
+    ) => this.createGroupConversation(args),
   };
 
   readonly message: {
@@ -380,11 +448,15 @@ export class PrismaService implements OnModuleDestroy {
     ): Promise<DirectAttachmentAccessRecord | null>;
     createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
     markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
+    findGroupMessages(args: FindGroupMessagesArgs): Promise<DirectMessageRecord[]>;
+    createGroupMessage(args: CreateGroupMessageArgs): Promise<{ message: DirectMessageRecord; participantIds: number[] }>;
   } = {
     findDirectMessages: (args) => this.findDirectMessages(args),
     findDirectAttachmentForUser: (args) => this.findDirectAttachmentForUser(args),
     createDirectMessage: (args) => this.createDirectMessage(args),
     markDirectChatRead: (args) => this.markDirectChatRead(args),
+    findGroupMessages: (args) => this.findGroupMessages(args),
+    createGroupMessage: (args) => this.createGroupMessage(args),
   };
 
   async $transaction<T>(
@@ -407,6 +479,56 @@ export class PrismaService implements OnModuleDestroy {
 
   async onModuleDestroy() {
     await this.pool.end();
+  }
+
+  async findGroupTypingTargets({
+    conversationUuid,
+    currentUserId,
+    organizationId,
+  }: {
+    conversationUuid: string;
+    currentUserId: number;
+    organizationId: number;
+  }): Promise<{ senderName: string; participantIds: number[] } | null> {
+    const result = await this.pool.query<{
+      sender_name: string;
+      participant_ids: number[];
+    }>(
+      `
+        SELECT
+          sender.name AS sender_name,
+          ARRAY(
+            SELECT cp2."userId"
+            FROM "ConversationParticipant" cp2
+            WHERE cp2."conversationId" = c.id
+              AND cp2."isActive" = true
+          ) AS participant_ids
+        FROM "Conversation" c
+        INNER JOIN "ConversationParticipant" cp
+          ON cp."conversationId" = c.id
+         AND cp."userId" = $1
+         AND cp."isActive" = true
+        INNER JOIN "UserMaster" sender
+          ON sender.id = $1
+        WHERE c.uuid = $2
+          AND c.type = 'GROUP'
+          AND c."isDeleted" = false
+          AND c."organizationId" = $3
+        LIMIT 1
+      `,
+      [currentUserId, conversationUuid, organizationId],
+    );
+
+    const row = result.rows[0];
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      senderName: row.sender_name,
+      participantIds: row.participant_ids ?? [],
+    };
   }
 
   private async findUniqueUser({
@@ -696,11 +818,11 @@ export class PrismaService implements OnModuleDestroy {
     search,
     filter = 'ALL',
   }: FindDirectConversationsForUserArgs): Promise<{
-    conversations: DirectConversationSummaryRecord[];
+    conversations: (DirectConversationSummaryRecord | GroupConversationSummaryRecord)[];
     total: number;
   }> {
     if (filter === 'GROUPS') {
-      return { conversations: [], total: 0 };
+      return this.findGroupConversationsForUser({ userId, organizationId, page, limit, search });
     }
 
     const offset = (page - 1) * limit;
@@ -1415,6 +1537,422 @@ export class PrismaService implements OnModuleDestroy {
           )
       ) AS unread ON true
     `;
+  }
+
+  private async findGroupMessages({
+    conversationUuid,
+    currentUserId,
+    organizationId,
+  }: FindGroupMessagesArgs): Promise<DirectMessageRecord[]> {
+    const result = await this.pool.query<DirectMessageRow>(
+      `
+        SELECT
+          m.uuid         AS message_uuid,
+          c.uuid         AS conversation_uuid,
+          sender.id      AS sender_id,
+          sender.uuid    AS sender_uuid,
+          sender.name    AS sender_name,
+          m.content      AS message_content,
+          m.type         AS message_type,
+          m."createdAt"  AS message_created_at,
+          m."updatedAt"  AS message_updated_at,
+          (m."senderId" = $1) AS is_own_message,
+          'sent' AS message_status,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'uuid',      ma.uuid,
+                'type',      ma.type,
+                'name',      ma.name,
+                'url',       ma.url,
+                'mimeType',  ma."mimeType",
+                'sizeBytes', ma.size
+              ) ORDER BY ma.id ASC
+            ) FILTER (WHERE ma.id IS NOT NULL),
+            '[]'::json
+          ) AS message_attachments
+        FROM "Conversation" c
+        INNER JOIN "ConversationParticipant" my_participant
+          ON my_participant."conversationId" = c.id
+         AND my_participant."userId" = $1
+         AND my_participant."isActive" = true
+        INNER JOIN "Message" m
+          ON m."conversationId" = c.id
+         AND m."isDeleted" = false
+        INNER JOIN "UserMaster" sender
+          ON sender.id = m."senderId"
+        LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
+        WHERE c.uuid = $2
+          AND c.type = 'GROUP'
+          AND c."isDeleted" = false
+          AND c."organizationId" = $3
+        GROUP BY
+          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
+          c.uuid,
+          sender.id, sender.uuid, sender.name
+        ORDER BY m."createdAt" ASC, m.id ASC
+      `,
+      [currentUserId, conversationUuid, organizationId],
+    );
+
+    await this.markGroupConversationRead({
+      conversationUuid,
+      currentUserId,
+      organizationId,
+    });
+
+    return result.rows.map((row) => this.mapDirectMessageRow(row));
+  }
+
+  private async createGroupMessage({
+    conversationUuid,
+    currentUserId,
+    organizationId,
+    content,
+    messageType = 'TEXT',
+    attachments = [],
+  }: CreateGroupMessageArgs): Promise<{ message: DirectMessageRecord; participantIds: number[] }> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const convResult = await client.query<{ id: number; uuid: string }>(
+        `
+          SELECT c.id, c.uuid
+          FROM "Conversation" c
+          INNER JOIN "ConversationParticipant" cp
+            ON cp."conversationId" = c.id
+           AND cp."userId" = $1
+           AND cp."isActive" = true
+          WHERE c.uuid = $2
+            AND c.type = 'GROUP'
+            AND c."isDeleted" = false
+            AND c."organizationId" = $3
+          LIMIT 1
+        `,
+        [currentUserId, conversationUuid, organizationId],
+      );
+
+      if (convResult.rows.length === 0) {
+        throw new Error('Group conversation not found or user is not a participant');
+      }
+
+      const conversation = convResult.rows[0];
+
+      type InsertedMessageRow = {
+        message_id: number;
+        message_uuid: string;
+        sender_id: number;
+        message_content: string | null;
+        message_type: string;
+        message_created_at: Date;
+        message_updated_at: Date;
+      };
+
+      const messageResult = await client.query<InsertedMessageRow>(
+        `
+          INSERT INTO "Message" (uuid, "conversationId", "senderId", type, content, "createdAt", "updatedAt")
+          VALUES (gen_random_uuid(), $1, $2, $4, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          RETURNING
+            id AS message_id,
+            uuid AS message_uuid,
+            "senderId" AS sender_id,
+            content AS message_content,
+            type AS message_type,
+            "createdAt" AS message_created_at,
+            "updatedAt" AS message_updated_at
+        `,
+        [conversation.id, currentUserId, content, messageType],
+      );
+
+      const baseMessage = messageResult.rows[0];
+
+      for (const att of attachments) {
+        await client.query(
+          `
+            INSERT INTO "MessageAttachment" (uuid, "messageId", type, name, url, "mimeType", size, "createdAt")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+          `,
+          [att.uuid, baseMessage.message_id, att.attachmentType, att.name, att.key, att.mimeType, att.sizeBytes],
+        );
+      }
+
+      await client.query(
+        `UPDATE "Conversation" SET "updatedAt" = CURRENT_TIMESTAMP WHERE id = $1`,
+        [conversation.id],
+      );
+
+      await client.query(
+        `
+          UPDATE "ConversationParticipant"
+          SET "lastReadAt" = CURRENT_TIMESTAMP, "lastReadMessageId" = $2, "updatedAt" = CURRENT_TIMESTAMP
+          WHERE "conversationId" = $1 AND "userId" = $3
+        `,
+        [conversation.id, baseMessage.message_id, currentUserId],
+      );
+
+      const sender = await client.query<{ id: number; uuid: string; name: string }>(
+        `SELECT id, uuid, name FROM "UserMaster" WHERE id = $1 LIMIT 1`,
+        [currentUserId],
+      );
+
+      const participantsResult = await client.query<{ userId: number }>(
+        `SELECT "userId" FROM "ConversationParticipant" WHERE "conversationId" = $1 AND "isActive" = true`,
+        [conversation.id],
+      );
+
+      await client.query('COMMIT');
+
+      const messageRecord = this.mapDirectMessageRow({
+        ...baseMessage,
+        conversation_uuid: conversation.uuid,
+        sender_uuid: sender.rows[0].uuid,
+        sender_name: sender.rows[0].name,
+        is_own_message: true,
+        message_status: 'sent',
+        message_attachments: attachments.map((a) => ({
+          uuid: a.uuid,
+          type: a.attachmentType,
+          name: a.name,
+          url: a.key,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+        })),
+      });
+
+      return {
+        message: messageRecord,
+        participantIds: participantsResult.rows.map((r) => r.userId),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async findGroupConversationsForUser({
+    userId,
+    organizationId,
+    page,
+    limit,
+    search,
+  }: FindGroupConversationsForUserArgs): Promise<{
+    conversations: GroupConversationSummaryRecord[];
+    total: number;
+  }> {
+    const offset = (page - 1) * limit;
+    const values: Array<number | string> = [userId, organizationId, limit, offset];
+    let searchClause = '';
+    const trimmed = search?.trim();
+
+    if (trimmed) {
+      values.push(`%${trimmed}%`);
+      const idx = values.length;
+      searchClause = ` AND (c.name ILIKE $${idx} OR COALESCE(last_message.content, '') ILIKE $${idx})`;
+    }
+
+    const result = await this.pool.query<GroupConversationRow>(
+      `
+        SELECT
+          c.uuid AS conversation_uuid,
+          c.name AS conversation_name,
+          c."createdAt" AS conversation_created_at,
+          c."updatedAt" AS conversation_updated_at,
+          COALESCE(unread.unread_count, 0) AS unread_count,
+          last_message.uuid AS last_message_uuid,
+          last_message.content AS last_message_content,
+          last_message.type AS last_message_type,
+          last_message."createdAt" AS last_message_created_at,
+          (
+            SELECT json_agg(json_build_object(
+              'id', u.id,
+              'uuid', u.uuid,
+              'name', u.name,
+              'email', u.email
+            ) ORDER BY u.name ASC)
+            FROM "ConversationParticipant" cp
+            INNER JOIN "UserMaster" u ON u.id = cp."userId"
+            WHERE cp."conversationId" = c.id
+              AND cp."isActive" = true
+              AND u."isDeleted" = false
+          ) AS participants_json,
+          COUNT(*) OVER() AS total_count
+        FROM "ConversationParticipant" my_participant
+        INNER JOIN "Conversation" c
+          ON c.id = my_participant."conversationId"
+          AND c.type = 'GROUP'
+          AND c."isDeleted" = false
+          AND c."organizationId" = $2
+        LEFT JOIN LATERAL (
+          SELECT m.uuid, m.content, m.type, m."createdAt"
+          FROM "Message" m
+          WHERE m."conversationId" = c.id AND m."isDeleted" = false
+          ORDER BY m."createdAt" DESC, m.id DESC
+          LIMIT 1
+        ) AS last_message ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::int AS unread_count
+          FROM "Message" m
+          WHERE m."conversationId" = c.id
+            AND m."isDeleted" = false
+            AND m."senderId" <> $1
+            AND (
+              my_participant."lastReadMessageId" IS NULL
+              OR m.id > my_participant."lastReadMessageId"
+            )
+        ) AS unread ON true
+        WHERE my_participant."userId" = $1
+          AND my_participant."isActive" = true${searchClause}
+        ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
+        LIMIT $3 OFFSET $4
+      `,
+      values,
+    );
+
+    const total =
+      result.rows.length > 0
+        ? parseInt(result.rows[0].total_count ?? '0', 10)
+        : 0;
+
+    const conversations: GroupConversationSummaryRecord[] = result.rows.map((row) => ({
+      uuid: row.conversation_uuid,
+      type: 'GROUP' as const,
+      name: row.conversation_name ?? 'Unnamed Group',
+      createdAt: row.conversation_created_at,
+      updatedAt: row.conversation_updated_at,
+      unreadCount: parseInt(row.unread_count, 10),
+      participants: row.participants_json ?? [],
+      lastMessage: row.last_message_uuid
+        ? {
+            uuid: row.last_message_uuid,
+            content: row.last_message_content,
+            type: row.last_message_type ?? 'TEXT',
+            createdAt: row.last_message_created_at ?? row.conversation_created_at,
+          }
+        : null,
+    }));
+
+    return { conversations, total };
+  }
+
+  private async markGroupConversationRead({
+    conversationUuid,
+    currentUserId,
+    organizationId,
+  }: FindGroupMessagesArgs): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE "ConversationParticipant" participant
+        SET
+          "lastReadAt" = CURRENT_TIMESTAMP,
+          "lastReadMessageId" = latest_message.id,
+          "updatedAt" = CURRENT_TIMESTAMP
+        FROM "Conversation" conversation
+        LEFT JOIN LATERAL (
+          SELECT id
+          FROM "Message"
+          WHERE "conversationId" = conversation.id
+            AND "isDeleted" = false
+          ORDER BY "createdAt" DESC, id DESC
+          LIMIT 1
+        ) AS latest_message ON true
+        WHERE participant."conversationId" = conversation.id
+          AND participant."userId" = $1
+          AND participant."isActive" = true
+          AND conversation.uuid = $2
+          AND conversation."organizationId" = $3
+          AND conversation.type = 'GROUP'
+          AND conversation."isDeleted" = false
+      `,
+      [currentUserId, conversationUuid, organizationId],
+    );
+  }
+
+  private async createGroupConversation({
+    organizationId,
+    creatorId,
+    name,
+    memberIds,
+  }: CreateGroupConversationArgs): Promise<GroupConversationSummaryRecord> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const conversationResult = await client.query<ConversationRecord>(
+        `
+          INSERT INTO "Conversation" (
+            uuid, type, "organizationId", name, "createdById", "createdAt", "updatedAt"
+          )
+          VALUES (gen_random_uuid(), 'GROUP', $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          RETURNING *
+        `,
+        [organizationId, name, creatorId],
+      );
+
+      const conversation = conversationResult.rows[0];
+
+      await client.query(
+        `
+          INSERT INTO "ConversationParticipant" (
+            uuid, "conversationId", "userId", role, "joinedAt", "isActive", "createdAt", "updatedAt"
+          )
+          VALUES (gen_random_uuid(), $1, $2, 'OWNER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `,
+        [conversation.id, creatorId],
+      );
+
+      for (const memberId of memberIds) {
+        await client.query(
+          `
+            INSERT INTO "ConversationParticipant" (
+              uuid, "conversationId", "userId", role, "joinedAt", "isActive", "createdAt", "updatedAt"
+            )
+            VALUES (gen_random_uuid(), $1, $2, 'MEMBER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `,
+          [conversation.id, memberId],
+        );
+      }
+
+      await client.query('COMMIT');
+
+      const participantsResult = await this.pool.query<{
+        id: number;
+        uuid: string;
+        name: string;
+        email: string;
+      }>(
+        `
+          SELECT u.id, u.uuid, u.name, u.email
+          FROM "ConversationParticipant" cp
+          INNER JOIN "UserMaster" u ON u.id = cp."userId"
+          WHERE cp."conversationId" = $1
+            AND cp."isActive" = true
+            AND u."isDeleted" = false
+          ORDER BY u.name ASC
+        `,
+        [conversation.id],
+      );
+
+      return {
+        uuid: conversation.uuid,
+        type: 'GROUP',
+        name: conversation.name ?? name,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        unreadCount: 0,
+        participants: participantsResult.rows,
+        lastMessage: null,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private mapDirectConversationRow(

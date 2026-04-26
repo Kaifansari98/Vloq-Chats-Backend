@@ -26,6 +26,18 @@ import {
   type CreateDirectMessageDto,
 } from './dto/create-direct-message.schema';
 import {
+  createGroupChatSchema,
+  type CreateGroupChatDto,
+} from './dto/create-group-chat.schema';
+import {
+  createGroupMessageSchema,
+  type CreateGroupMessageDto,
+} from './dto/create-group-message.schema';
+import {
+  uploadGroupMessageSchema,
+  type UploadGroupMessageDto,
+} from './dto/upload-group-message.schema';
+import {
   markDirectChatReadSchema,
   type MarkDirectChatReadDto,
 } from './dto/mark-direct-chat-read.schema';
@@ -77,6 +89,74 @@ export class ChatsController {
       limit,
       search,
       normalizedFilter,
+    );
+  }
+
+  @Post('group')
+  async createGroupChat(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: unknown,
+  ) {
+    const result = createGroupChatSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: CreateGroupChatDto = result.data;
+    return this.chatsService.createGroupChat(req.user, data);
+  }
+
+  @Get('group/:conversationUuid/messages')
+  listGroupMessages(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+  ) {
+    return this.chatsService.listGroupMessages(req.user, conversationUuid);
+  }
+
+  @Post('group/:conversationUuid/messages')
+  async sendGroupMessage(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Body() body: unknown,
+  ) {
+    const result = createGroupMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: CreateGroupMessageDto = result.data;
+    return this.chatsService.sendGroupMessage(req.user, conversationUuid, data);
+  }
+
+  @Post('group/:conversationUuid/messages/upload')
+  @UseInterceptors(
+    FilesInterceptor('files', 5, {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_FILE_SIZE_BYTES },
+    }),
+  )
+  async uploadGroupMessage(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Body() body: unknown,
+    @UploadedFiles() files: unknown,
+  ) {
+    const result = uploadGroupMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: UploadGroupMessageDto = result.data;
+    const uploadedFiles = (Array.isArray(files) ? files : []) as UploadFile[];
+    return this.chatsService.uploadGroupMessage(
+      req.user,
+      conversationUuid,
+      data,
+      uploadedFiles,
     );
   }
 

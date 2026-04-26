@@ -130,6 +130,22 @@ export class ChatsGateway
       .emit('direct_message:read', { readByUserId });
   }
 
+  emitGroupMessage(message: DirectMessageRecord, participantIds: number[]): void {
+    participantIds.forEach((userId) => {
+      this.server
+        .to(this.getUserRoom(userId))
+        .emit('group_message:new', message);
+    });
+  }
+
+  emitGroupCreated(participantIds: number[], conversationUuid: string): void {
+    participantIds.forEach((userId) => {
+      this.server
+        .to(this.getUserRoom(userId))
+        .emit('group_chat:created', { conversationUuid });
+    });
+  }
+
   @SubscribeMessage('direct_message:typing')
   handleDirectMessageTyping(
     @ConnectedSocket() client: Socket,
@@ -154,6 +170,50 @@ export class ChatsGateway
     this.server.to(this.getUserRoom(body.participantUserId)).emit('direct_message:typing', {
       fromUserId: userId,
       isTyping: Boolean(body.isTyping),
+    });
+  }
+
+  @SubscribeMessage('group_message:typing')
+  async handleGroupMessageTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    body: { conversationUuid?: string; isTyping?: boolean },
+  ) {
+    const userId = client.data.userId as number | undefined;
+    const organizationId = client.data.organizationId as number | undefined;
+
+    if (!userId || !organizationId) {
+      return;
+    }
+
+    if (
+      typeof body.conversationUuid !== 'string' ||
+      body.conversationUuid.trim().length === 0
+    ) {
+      return;
+    }
+
+    const participant = await this.prisma.findGroupTypingTargets({
+      conversationUuid: body.conversationUuid,
+      currentUserId: userId,
+      organizationId,
+    });
+
+    if (!participant) {
+      return;
+    }
+
+    participant.participantIds.forEach((participantUserId) => {
+      if (participantUserId === userId) {
+        return;
+      }
+
+      this.server.to(this.getUserRoom(participantUserId)).emit('group_message:typing', {
+        conversationUuid: body.conversationUuid,
+        fromUserId: userId,
+        fromUserName: participant.senderName,
+        isTyping: Boolean(body.isTyping),
+      });
     });
   }
 

@@ -8,6 +8,7 @@ import type { Readable } from 'stream';
 import {
   PrismaService,
   type DirectConversationSummaryRecord,
+  type GroupConversationSummaryRecord,
   type DirectMessageRecord,
   type MessageAttachmentRecord,
   type UserMasterRecord,
@@ -16,6 +17,9 @@ import { StorageService } from '../storage/storage.service';
 import { ChatsGateway } from './chats.gateway';
 import type { CreateDirectChatDto } from './dto/create-direct-chat.schema';
 import type { CreateDirectMessageDto } from './dto/create-direct-message.schema';
+import type { CreateGroupChatDto } from './dto/create-group-chat.schema';
+import type { CreateGroupMessageDto } from './dto/create-group-message.schema';
+import type { UploadGroupMessageDto } from './dto/upload-group-message.schema';
 import type { MarkDirectChatReadDto } from './dto/mark-direct-chat-read.schema';
 import type { UploadDirectMessageDto } from './dto/upload-direct-message.schema';
 
@@ -27,7 +31,7 @@ type UploadFile = {
 };
 
 type DirectChatsResponse = {
-  data: DirectConversationSummaryRecord[];
+  data: (DirectConversationSummaryRecord | GroupConversationSummaryRecord)[];
   total: number;
   page: number;
   limit: number;
@@ -309,6 +313,126 @@ export class ChatsService {
         return { ...msg, attachments: enrichedAtts };
       }),
     );
+  }
+
+  async listGroupMessages(
+    user: UserMasterRecord,
+    conversationUuid: string,
+  ): Promise<DirectMessagesResponse> {
+    const messages = await this.prisma.message.findGroupMessages({
+      conversationUuid,
+      currentUserId: user.id,
+      organizationId: user.organizationId,
+    });
+
+    return { data: await this.enrichWithSignedUrls(messages) };
+  }
+
+  async sendGroupMessage(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    data: CreateGroupMessageDto,
+  ): Promise<DirectMessageResponse> {
+    const { message, participantIds } = await this.prisma.message.createGroupMessage({
+      conversationUuid,
+      currentUserId: user.id,
+      organizationId: user.organizationId,
+      content: data.content.trim(),
+    });
+
+    this.chatsGateway.emitGroupMessage(message, participantIds);
+
+    return { message: 'Message sent successfully', data: message };
+  }
+
+  async uploadGroupMessage(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    data: UploadGroupMessageDto,
+    files: UploadFile[],
+  ): Promise<DirectMessageResponse> {
+    if (!files || files.length === 0) {
+      throw new BadRequestException('At least one file is required');
+    }
+
+    if (files.length > 5) {
+      throw new BadRequestException('Maximum 5 files allowed per message');
+    }
+
+    const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
+
+    for (const file of files) {
+      if (!this.storageService.isAllowedMimeType(file.mimetype)) {
+        throw new BadRequestException(`File type "${file.mimetype}" is not allowed`);
+      }
+      if (file.size > this.storageService.maxFileSize) {
+        throw new BadRequestException(
+          `"${file.originalname}" exceeds the ${maxMb} MB size limit`,
+        );
+      }
+    }
+
+    const folder = `group/${conversationUuid}`;
+    const uploaded = await Promise.all(
+      files.map((f) => this.storageService.uploadFile(f, folder)),
+    );
+
+    const allImages = files.every((f) => this.storageService.isImageMimeType(f.mimetype));
+    const messageType = allImages ? 'IMAGE' : 'FILE';
+
+    const attachmentInputs = uploaded.map((uf, i) => ({
+      uuid: randomUUID(),
+      attachmentType: this.storageService.isImageMimeType(files[i].mimetype)
+        ? ('IMAGE' as const)
+        : ('DOCUMENT' as const),
+      name: uf.originalName,
+      key: uf.key,
+      mimeType: uf.mimeType,
+      sizeBytes: uf.sizeBytes,
+    }));
+
+    const { message, participantIds } = await this.prisma.message.createGroupMessage({
+      conversationUuid,
+      currentUserId: user.id,
+      organizationId: user.organizationId,
+      content: data.content?.trim() || null,
+      messageType,
+      attachments: attachmentInputs,
+    });
+
+    const [enriched] = await this.enrichWithSignedUrls([message]);
+    this.chatsGateway.emitGroupMessage(enriched, participantIds);
+
+    return { message: 'Message sent successfully', data: enriched };
+  }
+
+  async createGroupChat(
+    user: UserMasterRecord,
+    data: CreateGroupChatDto,
+  ): Promise<{ message: string; data: GroupConversationSummaryRecord }> {
+    const uniqueMemberIds = [...new Set(data.memberIds.filter((id) => id !== user.id))];
+
+    if (uniqueMemberIds.length === 0) {
+      throw new BadRequestException('At least one other member is required');
+    }
+
+    for (const memberId of uniqueMemberIds) {
+      await this.ensureDirectParticipant(user, memberId);
+    }
+
+    const group = await this.prisma.conversation.createGroupConversation({
+      organizationId: user.organizationId,
+      creatorId: user.id,
+      name: data.name.trim(),
+      memberIds: uniqueMemberIds,
+    });
+
+    this.chatsGateway.emitGroupCreated(
+      group.participants.map((p) => p.id),
+      group.uuid,
+    );
+
+    return { message: 'Group created successfully', data: group };
   }
 
   private async ensureDirectParticipant(
