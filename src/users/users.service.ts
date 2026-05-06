@@ -6,6 +6,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.schema';
 import * as bcrypt from 'bcrypt';
+import type { UserMasterRecord } from '../prisma/prisma.service';
+import type { PushTokenDto } from './dto/push-token.schema';
 
 @Injectable()
 export class UsersService {
@@ -98,6 +100,34 @@ export class UsersService {
     return {
       message: 'User created successfully',
       data: safeUser,
+    };
+  }
+
+  async registerPushToken(user: UserMasterRecord, data: PushTokenDto) {
+    await this.prisma.userPushToken.upsertForUser({
+      data: {
+        userId: user.id,
+        token: data.token.trim(),
+        platform: 'WEB',
+        userAgent: data.userAgent?.trim() || null,
+      },
+    });
+
+    return {
+      message: 'Push token registered',
+    };
+  }
+
+  async removePushToken(user: UserMasterRecord, token: string) {
+    await this.prisma.userPushToken.deleteForUser({
+      where: {
+        userId: user.id,
+        token: token.trim(),
+      },
+    });
+
+    return {
+      message: 'Push token removed',
     };
   }
 }

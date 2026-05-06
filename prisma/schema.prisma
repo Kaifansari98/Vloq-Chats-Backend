@@ -53,6 +53,10 @@ enum AttachmentType {
   OTHER
 }
 
+enum UserNotificationType {
+  CHAT_MENTION
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Existing models
 // ─────────────────────────────────────────────────────────────
@@ -70,15 +74,33 @@ model OrganizationMaster {
 
   status OrgStatus @default(ACTIVE)
 
-  isActive Boolean @default(true)
+  isActive               Boolean @default(true)
+  isIpRestrictionEnabled Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  users         UserMaster[]
-  conversations Conversation[]
+  users                UserMaster[]
+  conversations        Conversation[]
+  restrictedIpMappings OrgRestrictedIpMapping[]
 
   @@index([slug])
+}
+
+model OrgRestrictedIpMapping {
+  id             Int     @id @default(autoincrement())
+  uuid           String  @unique @default(uuid())
+  organizationId Int
+  ipAddress      String
+  label          String? // optional human-readable label e.g. "Office Wi-Fi"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  organization OrganizationMaster @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, ipAddress])
+  @@index([organizationId])
 }
 
 model UserTypeMaster {
@@ -133,16 +155,35 @@ model UserMaster {
   deletedUsers UserMaster[] @relation("UserDeletedBy")
 
   // 🔹 Chat relations (back-relations — no columns added here)
-  createdConversations    Conversation[]          @relation("ConversationCreatedBy")
+  createdConversations    Conversation[]            @relation("ConversationCreatedBy")
   conversationParticipant ConversationParticipant[]
-  sentMessages            Message[]               @relation("MessageSender")
-  deletedMessages         Message[]               @relation("MessageDeletedBy")
+  sentMessages            Message[]                 @relation("MessageSender")
+  deletedMessages         Message[]                 @relation("MessageDeletedBy")
   mentions                MessageMention[]
   reactions               MessageReaction[]
+  pushTokens              UserPushToken[]
+  notifications           UserNotification[]
 
   @@unique([email, organizationId])
   @@index([organizationId])
   @@index([organizationId, isDeleted])
+}
+
+model UserPushToken {
+  id         Int      @id @default(autoincrement())
+  uuid       String   @unique @default(uuid())
+  userId     Int
+  token      String   @unique
+  platform   String   @default("WEB")
+  userAgent  String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  user UserMaster @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, platform])
 }
 
 model UserAuthProvider {
@@ -190,10 +231,11 @@ model Conversation {
   isDeleted   Boolean   @default(false)
   deletedAt   DateTime?
 
-  organization OrganizationMaster        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdBy    UserMaster                @relation("ConversationCreatedBy", fields: [createdById], references: [id])
-  participants ConversationParticipant[]
-  messages     Message[]
+  organization  OrganizationMaster        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy     UserMaster                @relation("ConversationCreatedBy", fields: [createdById], references: [id])
+  participants  ConversationParticipant[]
+  messages      Message[]
+  notifications UserNotification[]
 
   @@index([organizationId])
   @@index([organizationId, type])
@@ -244,10 +286,10 @@ model Message {
   // extensible bag: link previews, poll data, system event payload, etc.
   metadata Json?
 
-  isEdited  Boolean   @default(false)
-  editedAt  DateTime?
-  isDeleted Boolean   @default(false)
-  deletedAt DateTime?
+  isEdited    Boolean   @default(false)
+  editedAt    DateTime?
+  isDeleted   Boolean   @default(false)
+  deletedAt   DateTime?
   deletedById Int?
 
   createdAt DateTime @default(now())
@@ -261,10 +303,11 @@ model Message {
   parent  Message?  @relation("MessageThread", fields: [parentMessageId], references: [id])
   replies Message[] @relation("MessageThread")
 
-  attachments             MessageAttachment[]
-  mentions                MessageMention[]
-  reactions               MessageReaction[]
-  lastReadByParticipants  ConversationParticipant[] @relation("LastReadMessage")
+  attachments            MessageAttachment[]
+  mentions               MessageMention[]
+  reactions              MessageReaction[]
+  lastReadByParticipants ConversationParticipant[] @relation("LastReadMessage")
+  notifications          UserNotification[]
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@index([senderId])
@@ -330,5 +373,30 @@ model MessageReaction {
   user    UserMaster @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+model UserNotification {
+  id             Int                  @id @default(autoincrement())
+  uuid           String               @unique @default(uuid())
+  userId         Int
+  type           UserNotificationType
+  title          String
+  body           String
+  isRead         Boolean              @default(false)
+  readAt         DateTime?
+  messageId      Int?
+  conversationId Int?
+  metadata       Json?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @default(now()) @updatedAt
+
+  user         UserMaster    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message      Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@index([conversationId])
   @@index([messageId])
 }

@@ -3,8 +3,12 @@ import {
   ConflictException,
   Injectable,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import type { UserMasterRecord } from '../prisma/prisma.service';
 import { CreateOrgDto } from './dto/create-org.schema';
+import type { UpdateOrgSettingsDto } from './dto/update-org-settings.schema';
+import type { AddAllowedIpDto } from './dto/add-allowed-ip.schema';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -79,5 +83,38 @@ export class OrganizationService {
         user: safeUser,
       },
     };
+  }
+
+  async getSettings(user: UserMasterRecord) {
+    const settings = await this.prisma.getOrgSettings(user.organizationId);
+    return { data: settings };
+  }
+
+  async updateSettings(user: UserMasterRecord, data: UpdateOrgSettingsDto) {
+    await this.prisma.updateOrgIpRestriction(
+      user.organizationId,
+      data.isIpRestrictionEnabled,
+    );
+    return { message: 'Settings updated' };
+  }
+
+  async listAllowedIps(user: UserMasterRecord) {
+    const ips = await this.prisma.listAllowedIps(user.organizationId);
+    return { data: ips };
+  }
+
+  async addAllowedIp(user: UserMasterRecord, data: AddAllowedIpDto) {
+    const ip = await this.prisma.addAllowedIp(
+      user.organizationId,
+      data.ipAddress,
+      randomUUID(),
+      data.label,
+    );
+    return { message: 'IP added successfully', data: ip };
+  }
+
+  async removeAllowedIp(user: UserMasterRecord, ipUuid: string) {
+    await this.prisma.removeAllowedIp(user.organizationId, ipUuid);
+    return { message: 'IP removed successfully' };
   }
 }

@@ -15,6 +15,7 @@ import {
 } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { ChatsGateway } from './chats.gateway';
+import { NotificationsService } from '../notifications/notifications.service';
 import type { CreateDirectChatDto } from './dto/create-direct-chat.schema';
 import type { CreateDirectMessageDto } from './dto/create-direct-message.schema';
 import type { CreateGroupChatDto } from './dto/create-group-chat.schema';
@@ -68,6 +69,7 @@ export class ChatsService {
     private readonly prisma: PrismaService,
     private readonly chatsGateway: ChatsGateway,
     private readonly storageService: StorageService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async listDirectChats(
@@ -158,6 +160,7 @@ export class ChatsService {
 
     // Text messages have no attachments — no enrichment needed
     this.chatsGateway.emitDirectMessage(message, data.participantUserId);
+    this.notifyOfflineUsers([data.participantUserId], message, 'DIRECT');
 
     return {
       message: 'Message sent successfully',
@@ -236,6 +239,7 @@ export class ChatsService {
     const [enriched] = await this.enrichWithSignedUrls([message]);
 
     this.chatsGateway.emitDirectMessage(enriched, data.participantUserId);
+    this.notifyOfflineUsers([data.participantUserId], enriched, 'DIRECT');
 
     return {
       message: 'Message sent successfully',
@@ -333,14 +337,38 @@ export class ChatsService {
     conversationUuid: string,
     data: CreateGroupMessageDto,
   ): Promise<DirectMessageResponse> {
-    const { message, participantIds } = await this.prisma.message.createGroupMessage({
+    const {
+      message,
+      participantIds,
+      mentionRecipientIds,
+      conversationName,
+      messageId,
+    } = await this.prisma.message.createGroupMessage({
       conversationUuid,
       currentUserId: user.id,
       organizationId: user.organizationId,
       content: data.content.trim(),
+      mentions: data.mentions ?? [],
     });
 
     this.chatsGateway.emitGroupMessage(message, participantIds);
+    await this.createMentionNotifications(
+      mentionRecipientIds,
+      message,
+      messageId,
+      conversationName,
+    );
+    this.notifyOfflineUsers(
+      participantIds.filter((id) => !mentionRecipientIds.includes(id)),
+      message,
+      'GROUP',
+      conversationName,
+    );
+    this.notifyMentionedOfflineUsers(
+      mentionRecipientIds,
+      message,
+      conversationName,
+    );
 
     return { message: 'Message sent successfully', data: message };
   }
@@ -391,17 +419,41 @@ export class ChatsService {
       sizeBytes: uf.sizeBytes,
     }));
 
-    const { message, participantIds } = await this.prisma.message.createGroupMessage({
+    const {
+      message,
+      participantIds,
+      mentionRecipientIds,
+      conversationName,
+      messageId,
+    } = await this.prisma.message.createGroupMessage({
       conversationUuid,
       currentUserId: user.id,
       organizationId: user.organizationId,
       content: data.content?.trim() || null,
       messageType,
       attachments: attachmentInputs,
+      mentions: data.mentions ?? [],
     });
 
     const [enriched] = await this.enrichWithSignedUrls([message]);
     this.chatsGateway.emitGroupMessage(enriched, participantIds);
+    await this.createMentionNotifications(
+      mentionRecipientIds,
+      enriched,
+      messageId,
+      conversationName,
+    );
+    this.notifyOfflineUsers(
+      participantIds.filter((id) => !mentionRecipientIds.includes(id)),
+      enriched,
+      'GROUP',
+      conversationName,
+    );
+    this.notifyMentionedOfflineUsers(
+      mentionRecipientIds,
+      enriched,
+      conversationName,
+    );
 
     return { message: 'Message sent successfully', data: enriched };
   }
@@ -453,5 +505,76 @@ export class ChatsService {
     }
 
     return participant;
+  }
+
+  private notifyOfflineUsers(
+    participantIds: number[],
+    message: DirectMessageRecord,
+    conversationType: 'DIRECT' | 'GROUP',
+    conversationName?: string,
+  ) {
+    const offlineUserIds = [...new Set(participantIds)].filter(
+      (userId) =>
+        userId !== message.senderId && !this.chatsGateway.isUserOnline(userId),
+    );
+
+    if (offlineUserIds.length === 0) {
+      return;
+    }
+
+    void this.notificationsService.sendChatMessageNotification({
+      recipientUserIds: offlineUserIds,
+      message,
+      conversationType,
+      conversationName,
+    });
+  }
+
+  private notifyMentionedOfflineUsers(
+    participantIds: number[],
+    message: DirectMessageRecord,
+    conversationName: string,
+  ) {
+    const offlineUserIds = [...new Set(participantIds)].filter(
+      (userId) =>
+        userId !== message.senderId && !this.chatsGateway.isUserOnline(userId),
+    );
+
+    if (offlineUserIds.length === 0) {
+      return;
+    }
+
+    void this.notificationsService.sendMentionPushNotification(
+      offlineUserIds,
+      message,
+      conversationName,
+    );
+  }
+
+  private async createMentionNotifications(
+    recipientUserIds: number[],
+    message: DirectMessageRecord,
+    messageId: number,
+    conversationName: string,
+  ) {
+    if (typeof message.conversationId !== 'number') {
+      return;
+    }
+
+    const notifications =
+      await this.notificationsService.createMentionNotifications({
+        recipientUserIds,
+        message,
+        messageId,
+        conversationId: message.conversationId,
+        conversationName,
+      });
+
+    notifications.forEach((notification) => {
+      const mentionedUserId = notification.metadata?.mentionedUserId;
+      if (typeof mentionedUserId === 'number') {
+        this.chatsGateway.emitNotification(mentionedUserId, notification);
+      }
+    });
   }
 }

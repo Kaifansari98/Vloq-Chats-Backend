@@ -12,6 +12,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { UserMasterRecord } from '../prisma/prisma.service';
 import { UsersService } from './users.service';
 import { CreateUserDto, createUserSchema } from './dto/create-user.schema';
+import { PushTokenDto, pushTokenSchema } from './dto/push-token.schema';
 
 type AuthenticatedRequest = Request & {
   user: UserMasterRecord;
@@ -57,5 +58,37 @@ export class UsersController {
       message: 'Authorized',
       user: req.user,
     };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('push-tokens')
+  async registerPushToken(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: unknown,
+  ) {
+    const result = pushTokenSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: PushTokenDto = result.data;
+    return this.usersService.registerPushToken(req.user, data);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('push-tokens/remove')
+  async removePushToken(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: unknown,
+  ) {
+    const result = pushTokenSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: PushTokenDto = result.data;
+    return this.usersService.removePushToken(req.user, data.token);
   }
 }

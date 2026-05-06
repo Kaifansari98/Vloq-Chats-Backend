@@ -9,7 +9,10 @@ import {
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
-import type { DirectMessageRecord } from '../prisma/prisma.service';
+import type {
+  DirectMessageRecord,
+  UserNotificationRecord,
+} from '../prisma/prisma.service';
 import type { Server, Socket } from 'socket.io';
 
 type SocketJwtPayload = {
@@ -55,6 +58,20 @@ export class ChatsGateway
       });
 
       if (!user || user.isDeleted || !user.isActive) {
+        client.disconnect();
+        return;
+      }
+
+      const ip = this.extractClientIp(client);
+      const blocked = await this.prisma.checkIpRestriction(
+        user.organizationId,
+        ip,
+      );
+
+      if (blocked) {
+        client.emit('ip_restricted', {
+          message: 'Access restricted from this IP address',
+        });
         client.disconnect();
         return;
       }
@@ -146,6 +163,14 @@ export class ChatsGateway
     });
   }
 
+  emitNotification(userId: number, notification: UserNotificationRecord): void {
+    this.server.to(this.getUserRoom(userId)).emit('notification:new', notification);
+  }
+
+  isUserOnline(userId: number): boolean {
+    return this.onlineUsers.has(userId);
+  }
+
   @SubscribeMessage('direct_message:typing')
   handleDirectMessageTyping(
     @ConnectedSocket() client: Socket,
@@ -215,6 +240,17 @@ export class ChatsGateway
         isTyping: Boolean(body.isTyping),
       });
     });
+  }
+
+  private extractClientIp(client: Socket): string {
+    const forwarded = client.handshake.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      return forwarded.split(',')[0].trim();
+    }
+    if (Array.isArray(forwarded) && forwarded.length > 0) {
+      return (forwarded[0] ?? '').split(',')[0].trim();
+    }
+    return (client.handshake.address ?? '').replace(/^::ffff:/, '');
   }
 
   private extractToken(client: Socket): string | null {

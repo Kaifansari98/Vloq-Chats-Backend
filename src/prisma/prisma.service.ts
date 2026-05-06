@@ -7,6 +7,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool, type PoolClient } from 'pg';
+import { randomUUID } from 'crypto';
 
 type UserAuthProviderRecord = {
   id: number;
@@ -118,6 +119,7 @@ export type DirectAttachmentAccessRecord = {
 
 export type DirectMessageRecord = {
   uuid: string;
+  conversationId?: number;
   conversationUuid: string;
   senderId: number;
   senderUuid: string;
@@ -129,6 +131,19 @@ export type DirectMessageRecord = {
   isOwnMessage: boolean;
   status: 'sent' | 'read';
   attachments: MessageAttachmentRecord[];
+};
+
+export type UserNotificationRecord = {
+  uuid: string;
+  type: 'CHAT_MENTION';
+  title: string;
+  body: string;
+  isRead: boolean;
+  readAt: Date | null;
+  createdAt: Date;
+  conversationUuid: string | null;
+  messageUuid: string | null;
+  metadata: Record<string, unknown> | null;
 };
 
 export type UserMasterRecord = {
@@ -148,6 +163,18 @@ export type UserMasterRecord = {
   isDeleted: boolean;
   deletedAt: Date | null;
   authProviders?: UserAuthProviderRecord[];
+};
+
+type UserPushTokenRecord = {
+  id: number;
+  uuid: string;
+  userId: number;
+  token: string;
+  platform: string;
+  userAgent: string | null;
+  lastSeenAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 type FindUniqueArgs = {
@@ -319,6 +346,68 @@ type CreateGroupMessageArgs = {
   content: string | null;
   messageType?: 'TEXT' | 'IMAGE' | 'FILE';
   attachments?: DirectMessageAttachmentInput[];
+  mentions?: Array<{
+    mentionedUserId: number;
+    offset: number;
+    length: number;
+  }>;
+};
+
+type UpsertUserPushTokenArgs = {
+  data: {
+    userId: number;
+    token: string;
+    platform: string;
+    userAgent: string | null;
+  };
+};
+
+type DeleteUserPushTokenArgs = {
+  where: {
+    userId: number;
+    token: string;
+  };
+};
+
+type FindPushTokensByUserIdsArgs = {
+  userIds: number[];
+};
+
+type DeleteManyPushTokensArgs = {
+  tokens: string[];
+};
+
+type CreateMentionNotificationsArgs = {
+  userIds: number[];
+  conversationId: number;
+  messageId: number;
+  title: string;
+  body: string;
+  metadata: Record<string, unknown>;
+};
+
+type ListUserNotificationsArgs = {
+  userId: number;
+  page: number;
+  limit: number;
+};
+
+type CountUnreadNotificationsArgs = {
+  userId: number;
+};
+
+type MarkNotificationReadArgs = {
+  userId: number;
+  notificationUuid: string;
+};
+
+type MarkAllNotificationsReadArgs = {
+  userId: number;
+};
+
+type MarkConversationNotificationsReadArgs = {
+  userId: number;
+  conversationUuid: string;
 };
 
 type DirectConversationRow = {
@@ -363,6 +452,7 @@ type AttachmentJsonRow = {
 
 type DirectMessageRow = {
   message_uuid: string;
+  conversation_id?: number;
   conversation_uuid: string;
   sender_id: number;
   sender_uuid: string;
@@ -374,6 +464,20 @@ type DirectMessageRow = {
   is_own_message: boolean;
   message_status: string;
   message_attachments: AttachmentJsonRow[];
+};
+
+type NotificationRow = {
+  notification_uuid: string;
+  notification_type: 'CHAT_MENTION';
+  notification_title: string;
+  notification_body: string;
+  notification_is_read: boolean;
+  notification_read_at: Date | null;
+  notification_created_at: Date;
+  conversation_uuid: string | null;
+  message_uuid: string | null;
+  notification_metadata: Record<string, unknown> | null;
+  total_count?: string;
 };
 
 type TransactionClient = {
@@ -429,6 +533,32 @@ export class PrismaService implements OnModuleDestroy {
       this.createUserAuthProvider(args),
   };
 
+  readonly userPushToken = {
+    upsertForUser: async (args: UpsertUserPushTokenArgs) =>
+      this.upsertUserPushToken(args),
+    deleteForUser: async (args: DeleteUserPushTokenArgs) =>
+      this.deleteUserPushToken(args),
+    findTokensByUserIds: async (args: FindPushTokensByUserIdsArgs) =>
+      this.findPushTokensByUserIds(args),
+    deleteManyByTokens: async (args: DeleteManyPushTokensArgs) =>
+      this.deleteManyPushTokens(args),
+  };
+
+  readonly userNotification = {
+    createMentions: async (args: CreateMentionNotificationsArgs) =>
+      this.createMentionNotifications(args),
+    listForUser: async (args: ListUserNotificationsArgs) =>
+      this.listUserNotifications(args),
+    countUnreadForUser: async (args: CountUnreadNotificationsArgs) =>
+      this.countUnreadNotifications(args),
+    markRead: async (args: MarkNotificationReadArgs) =>
+      this.markNotificationRead(args),
+    markAllRead: async (args: MarkAllNotificationsReadArgs) =>
+      this.markAllNotificationsRead(args),
+    markConversationRead: async (args: MarkConversationNotificationsReadArgs) =>
+      this.markConversationNotificationsRead(args),
+  };
+
   readonly conversation = {
     findDirectConversationsForUser: async (
       args: FindDirectConversationsForUserArgs,
@@ -449,7 +579,13 @@ export class PrismaService implements OnModuleDestroy {
     createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
     markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
     findGroupMessages(args: FindGroupMessagesArgs): Promise<DirectMessageRecord[]>;
-    createGroupMessage(args: CreateGroupMessageArgs): Promise<{ message: DirectMessageRecord; participantIds: number[] }>;
+    createGroupMessage(args: CreateGroupMessageArgs): Promise<{
+      message: DirectMessageRecord;
+      participantIds: number[];
+      mentionRecipientIds: number[];
+      conversationName: string;
+      messageId: number;
+    }>;
   } = {
     findDirectMessages: (args) => this.findDirectMessages(args),
     findDirectAttachmentForUser: (args) => this.findDirectAttachmentForUser(args),
@@ -531,6 +667,148 @@ export class PrismaService implements OnModuleDestroy {
     };
   }
 
+  async getOrgSettings(
+    organizationId: number,
+  ): Promise<{ isIpRestrictionEnabled: boolean }> {
+    const result = await this.pool.query<{ isIpRestrictionEnabled: boolean }>(
+      `SELECT "isIpRestrictionEnabled" FROM "OrganizationMaster" WHERE id = $1 LIMIT 1`,
+      [organizationId],
+    );
+    return {
+      isIpRestrictionEnabled: result.rows[0]?.isIpRestrictionEnabled ?? false,
+    };
+  }
+
+  async updateOrgIpRestriction(
+    organizationId: number,
+    enabled: boolean,
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE "OrganizationMaster"
+       SET "isIpRestrictionEnabled" = $1, "updatedAt" = NOW()
+       WHERE id = $2`,
+      [enabled, organizationId],
+    );
+  }
+
+  async listAllowedIps(organizationId: number): Promise<
+    Array<{
+      id: number;
+      uuid: string;
+      ipAddress: string;
+      label: string | null;
+      createdAt: Date;
+    }>
+  > {
+    const result = await this.pool.query<{
+      id: number;
+      uuid: string;
+      ipAddress: string;
+      label: string | null;
+      createdAt: Date;
+    }>(
+      `SELECT id, uuid, "ipAddress", label, "createdAt"
+       FROM "OrgRestrictedIpMapping"
+       WHERE "organizationId" = $1
+       ORDER BY "createdAt" ASC`,
+      [organizationId],
+    );
+    return result.rows;
+  }
+
+  async addAllowedIp(
+    organizationId: number,
+    ipAddress: string,
+    uuid: string,
+    label?: string,
+  ): Promise<{
+    id: number;
+    uuid: string;
+    ipAddress: string;
+    label: string | null;
+    createdAt: Date;
+  }> {
+    const existing = await this.pool.query<{
+      id: number;
+      uuid: string;
+      ipAddress: string;
+      label: string | null;
+      createdAt: Date;
+    }>(
+      `SELECT id, uuid, "ipAddress", label, "createdAt"
+       FROM "OrgRestrictedIpMapping"
+       WHERE "organizationId" = $1 AND "ipAddress" = $2
+       LIMIT 1`,
+      [organizationId, ipAddress],
+    );
+    if (existing.rows.length > 0) return existing.rows[0]!;
+
+    const result = await this.pool.query<{
+      id: number;
+      uuid: string;
+      ipAddress: string;
+      label: string | null;
+      createdAt: Date;
+    }>(
+      `INSERT INTO "OrgRestrictedIpMapping" (uuid, "organizationId", "ipAddress", label)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, uuid, "ipAddress", label, "createdAt"`,
+      [uuid, organizationId, ipAddress, label ?? null],
+    );
+    return result.rows[0]!;
+  }
+
+  async removeAllowedIp(organizationId: number, ipUuid: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM "OrgRestrictedIpMapping"
+       WHERE uuid = $1 AND "organizationId" = $2`,
+      [ipUuid, organizationId],
+    );
+  }
+
+  async checkIpRestriction(
+    organizationId: number,
+    rawIp: string,
+  ): Promise<boolean> {
+    const ip = rawIp.replace(/^::ffff:/, '');
+    console.log('[IP-CHECK] orgId=%d rawIp=%s normalizedIp=%s', organizationId, rawIp, ip);
+
+    // Loopback traffic always originates from the same machine as the server → always allow
+    if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') return false;
+
+    const orgResult = await this.pool.query<{ isIpRestrictionEnabled: boolean }>(
+      `SELECT "isIpRestrictionEnabled" FROM "OrganizationMaster" WHERE id = $1 LIMIT 1`,
+      [organizationId],
+    );
+
+    const org = orgResult.rows[0];
+    console.log('[IP-CHECK] isIpRestrictionEnabled=%s', org?.isIpRestrictionEnabled);
+    if (!org || !org.isIpRestrictionEnabled) return false;
+
+    // Single query: total allowed IPs + whether this specific IP is in the list
+    const result = await this.pool.query<{
+      total_ips: string;
+      ip_allowed: string;
+    }>(
+      `SELECT
+         COUNT(*)                                    AS total_ips,
+         COUNT(*) FILTER (WHERE "ipAddress" = $2)   AS ip_allowed
+       FROM "OrgRestrictedIpMapping"
+       WHERE "organizationId" = $1`,
+      [organizationId, ip],
+    );
+
+    const row = result.rows[0];
+    const totalIps = parseInt(row?.total_ips ?? '0', 10);
+    const ipAllowed = parseInt(row?.ip_allowed ?? '0', 10);
+
+    // No IPs configured yet → restriction flag is on but not active yet
+    if (totalIps === 0) return false;
+
+    // IPs are configured → block anyone not in the list
+    return ipAllowed === 0;
+  }
+
   private async findUniqueUser({
     where,
     include,
@@ -590,6 +868,298 @@ export class PrismaService implements OnModuleDestroy {
       },
     );
     return { members, total };
+  }
+
+  private async upsertUserPushToken({
+    data,
+  }: UpsertUserPushTokenArgs): Promise<UserPushTokenRecord> {
+    const result = await this.pool.query<UserPushTokenRecord>(
+      `
+        INSERT INTO "UserPushToken" (
+          "uuid",
+          "userId",
+          "token",
+          "platform",
+          "userAgent",
+          "lastSeenAt"
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT ("token")
+        DO UPDATE SET
+          "userId" = EXCLUDED."userId",
+          "platform" = EXCLUDED."platform",
+          "userAgent" = EXCLUDED."userAgent",
+          "lastSeenAt" = NOW(),
+          "updatedAt" = NOW()
+        RETURNING
+          id,
+          uuid,
+          "userId",
+          token,
+          platform,
+          "userAgent",
+          "lastSeenAt",
+          "createdAt",
+          "updatedAt"
+      `,
+      [
+        randomUUID(),
+        data.userId,
+        data.token,
+        data.platform,
+        data.userAgent,
+      ],
+    );
+
+    return result.rows[0]!;
+  }
+
+  private async deleteUserPushToken({
+    where,
+  }: DeleteUserPushTokenArgs): Promise<void> {
+    await this.pool.query(
+      `
+        DELETE FROM "UserPushToken"
+        WHERE "userId" = $1
+          AND token = $2
+      `,
+      [where.userId, where.token],
+    );
+  }
+
+  private async findPushTokensByUserIds({
+    userIds,
+  }: FindPushTokensByUserIdsArgs): Promise<UserPushTokenRecord[]> {
+    if (userIds.length === 0) {
+      return [];
+    }
+
+    const result = await this.pool.query<UserPushTokenRecord>(
+      `
+        SELECT
+          id,
+          uuid,
+          "userId",
+          token,
+          platform,
+          "userAgent",
+          "lastSeenAt",
+          "createdAt",
+          "updatedAt"
+        FROM "UserPushToken"
+        WHERE "userId" = ANY($1::int[])
+      `,
+      [userIds],
+    );
+
+    return result.rows;
+  }
+
+  private async deleteManyPushTokens({
+    tokens,
+  }: DeleteManyPushTokensArgs): Promise<void> {
+    if (tokens.length === 0) {
+      return;
+    }
+
+    await this.pool.query(
+      `
+        DELETE FROM "UserPushToken"
+        WHERE token = ANY($1::text[])
+      `,
+      [tokens],
+    );
+  }
+
+  private async createMentionNotifications({
+    userIds,
+    conversationId,
+    messageId,
+    title,
+    body,
+    metadata,
+  }: CreateMentionNotificationsArgs): Promise<UserNotificationRecord[]> {
+    if (userIds.length === 0) {
+      return [];
+    }
+
+    const created: UserNotificationRecord[] = [];
+
+    for (const userId of [...new Set(userIds)]) {
+      const result = await this.pool.query<NotificationRow>(
+        `
+          INSERT INTO "UserNotification" (
+            uuid,
+            "userId",
+            type,
+            title,
+            body,
+            "messageId",
+            "conversationId",
+            metadata,
+            "createdAt",
+            "updatedAt"
+          )
+          VALUES (
+            gen_random_uuid(),
+            $1,
+            'CHAT_MENTION',
+            $2,
+            $3,
+            $4,
+            $5,
+            $6::jsonb,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          )
+          RETURNING
+            uuid AS notification_uuid,
+            type AS notification_type,
+            title AS notification_title,
+            body AS notification_body,
+            "isRead" AS notification_is_read,
+            "readAt" AS notification_read_at,
+            "createdAt" AS notification_created_at,
+            metadata AS notification_metadata
+        `,
+        [
+          userId,
+          title,
+          body,
+          messageId,
+          conversationId,
+          JSON.stringify({
+            ...metadata,
+            mentionedUserId: userId,
+          }),
+        ],
+      );
+
+      created.push({
+        ...this.mapNotificationRow(result.rows[0]!),
+        conversationUuid: metadata.conversationUuid as string,
+        messageUuid: metadata.messageUuid as string,
+      });
+    }
+
+    return created;
+  }
+
+  private async listUserNotifications({
+    userId,
+    page,
+    limit,
+  }: ListUserNotificationsArgs): Promise<{
+    notifications: UserNotificationRecord[];
+    total: number;
+  }> {
+    const offset = (page - 1) * limit;
+    const result = await this.pool.query<NotificationRow>(
+      `
+        SELECT
+          n.uuid AS notification_uuid,
+          n.type AS notification_type,
+          n.title AS notification_title,
+          n.body AS notification_body,
+          n."isRead" AS notification_is_read,
+          n."readAt" AS notification_read_at,
+          n."createdAt" AS notification_created_at,
+          c.uuid AS conversation_uuid,
+          m.uuid AS message_uuid,
+          n.metadata AS notification_metadata,
+          COUNT(*) OVER() AS total_count
+        FROM "UserNotification" n
+        LEFT JOIN "Conversation" c ON c.id = n."conversationId"
+        LEFT JOIN "Message" m ON m.id = n."messageId"
+        WHERE n."userId" = $1
+        ORDER BY n."createdAt" DESC, n.id DESC
+        LIMIT $2 OFFSET $3
+      `,
+      [userId, limit, offset],
+    );
+
+    const total =
+      result.rows.length > 0
+        ? parseInt(result.rows[0].total_count ?? '0', 10)
+        : 0;
+
+    return {
+      notifications: result.rows.map((row) => this.mapNotificationRow(row)),
+      total,
+    };
+  }
+
+  private async countUnreadNotifications({
+    userId,
+  }: CountUnreadNotificationsArgs): Promise<number> {
+    const result = await this.pool.query<{ unread_count: string }>(
+      `
+        SELECT COUNT(*)::text AS unread_count
+        FROM "UserNotification"
+        WHERE "userId" = $1
+          AND "isRead" = false
+      `,
+      [userId],
+    );
+
+    return parseInt(result.rows[0]?.unread_count ?? '0', 10);
+  }
+
+  private async markNotificationRead({
+    userId,
+    notificationUuid,
+  }: MarkNotificationReadArgs): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE "UserNotification"
+        SET
+          "isRead" = true,
+          "readAt" = CURRENT_TIMESTAMP,
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "userId" = $1
+          AND uuid = $2
+          AND "isRead" = false
+      `,
+      [userId, notificationUuid],
+    );
+  }
+
+  private async markAllNotificationsRead({
+    userId,
+  }: MarkAllNotificationsReadArgs): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE "UserNotification"
+        SET
+          "isRead" = true,
+          "readAt" = CURRENT_TIMESTAMP,
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "userId" = $1
+          AND "isRead" = false
+      `,
+      [userId],
+    );
+  }
+
+  private async markConversationNotificationsRead({
+    userId,
+    conversationUuid,
+  }: MarkConversationNotificationsReadArgs): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE "UserNotification" notification
+        SET
+          "isRead" = true,
+          "readAt" = CURRENT_TIMESTAMP,
+          "updatedAt" = CURRENT_TIMESTAMP
+        FROM "Conversation" conversation
+        WHERE notification."conversationId" = conversation.id
+          AND notification."userId" = $1
+          AND notification."isRead" = false
+          AND conversation.uuid = $2
+      `,
+      [userId, conversationUuid],
+    );
   }
 
   private async findOrganizationById({
@@ -1181,6 +1751,14 @@ export class PrismaService implements OnModuleDestroy {
       [currentUserId, participantUserId, organizationId, directKey],
     );
 
+    const conversationUuid = result.rows[0]?.conversation_uuid;
+    if (conversationUuid) {
+      await this.markConversationNotificationsRead({
+        userId: currentUserId,
+        conversationUuid,
+      });
+    }
+
     return result.rows.map((row) => this.mapDirectMessageRow(row));
   }
 
@@ -1410,6 +1988,7 @@ export class PrismaService implements OnModuleDestroy {
 
       return this.mapDirectMessageRow({
         ...baseMessage,
+        conversation_id: conversation.id,
         conversation_uuid: conversation.uuid,
         sender_uuid: sender.rows[0].uuid,
         sender_name: sender.rows[0].name,
@@ -1600,6 +2179,10 @@ export class PrismaService implements OnModuleDestroy {
       currentUserId,
       organizationId,
     });
+    await this.markConversationNotificationsRead({
+      userId: currentUserId,
+      conversationUuid,
+    });
 
     return result.rows.map((row) => this.mapDirectMessageRow(row));
   }
@@ -1611,15 +2194,26 @@ export class PrismaService implements OnModuleDestroy {
     content,
     messageType = 'TEXT',
     attachments = [],
-  }: CreateGroupMessageArgs): Promise<{ message: DirectMessageRecord; participantIds: number[] }> {
+    mentions = [],
+  }: CreateGroupMessageArgs): Promise<{
+    message: DirectMessageRecord;
+    participantIds: number[];
+    mentionRecipientIds: number[];
+    conversationName: string;
+    messageId: number;
+  }> {
     const client = await this.pool.connect();
 
     try {
       await client.query('BEGIN');
 
-      const convResult = await client.query<{ id: number; uuid: string }>(
+      const convResult = await client.query<{
+        id: number;
+        uuid: string;
+        name: string | null;
+      }>(
         `
-          SELECT c.id, c.uuid
+          SELECT c.id, c.uuid, c.name
           FROM "Conversation" c
           INNER JOIN "ConversationParticipant" cp
             ON cp."conversationId" = c.id
@@ -1668,6 +2262,50 @@ export class PrismaService implements OnModuleDestroy {
 
       const baseMessage = messageResult.rows[0];
 
+      const participantsResult = await client.query<{ userId: number }>(
+        `SELECT "userId" FROM "ConversationParticipant" WHERE "conversationId" = $1 AND "isActive" = true`,
+        [conversation.id],
+      );
+
+      const participantIds = participantsResult.rows.map((r) => r.userId);
+      const validMentionRecipientIds = [...new Set(
+        mentions
+          .filter(
+            (mention) =>
+              mention.mentionedUserId !== currentUserId &&
+              participantIds.includes(mention.mentionedUserId),
+          )
+          .map((mention) => mention.mentionedUserId),
+      )];
+
+      for (const mention of mentions) {
+        if (
+          mention.mentionedUserId === currentUserId ||
+          !participantIds.includes(mention.mentionedUserId)
+        ) {
+          continue;
+        }
+
+        await client.query(
+          `
+            INSERT INTO "MessageMention" (
+              "messageId",
+              "mentionedUserId",
+              "offset",
+              "length",
+              "createdAt"
+            )
+            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+          `,
+          [
+            baseMessage.message_id,
+            mention.mentionedUserId,
+            mention.offset,
+            mention.length,
+          ],
+        );
+      }
+
       for (const att of attachments) {
         await client.query(
           `
@@ -1697,15 +2335,11 @@ export class PrismaService implements OnModuleDestroy {
         [currentUserId],
       );
 
-      const participantsResult = await client.query<{ userId: number }>(
-        `SELECT "userId" FROM "ConversationParticipant" WHERE "conversationId" = $1 AND "isActive" = true`,
-        [conversation.id],
-      );
-
       await client.query('COMMIT');
 
       const messageRecord = this.mapDirectMessageRow({
         ...baseMessage,
+        conversation_id: conversation.id,
         conversation_uuid: conversation.uuid,
         sender_uuid: sender.rows[0].uuid,
         sender_name: sender.rows[0].name,
@@ -1723,7 +2357,10 @@ export class PrismaService implements OnModuleDestroy {
 
       return {
         message: messageRecord,
-        participantIds: participantsResult.rows.map((r) => r.userId),
+        participantIds,
+        mentionRecipientIds: validMentionRecipientIds,
+        conversationName: conversation.name ?? 'Group chat',
+        messageId: baseMessage.message_id,
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1985,6 +2622,7 @@ export class PrismaService implements OnModuleDestroy {
   private mapDirectMessageRow(row: DirectMessageRow): DirectMessageRecord {
     return {
       uuid: row.message_uuid,
+      conversationId: row.conversation_id,
       conversationUuid: row.conversation_uuid,
       senderId: row.sender_id,
       senderUuid: row.sender_uuid,
@@ -2003,6 +2641,21 @@ export class PrismaService implements OnModuleDestroy {
         mimeType: a.mimeType,
         sizeBytes: typeof a.sizeBytes === 'string' ? parseInt(a.sizeBytes, 10) : a.sizeBytes,
       })),
+    };
+  }
+
+  private mapNotificationRow(row: NotificationRow): UserNotificationRecord {
+    return {
+      uuid: row.notification_uuid,
+      type: row.notification_type,
+      title: row.notification_title,
+      body: row.notification_body,
+      isRead: row.notification_is_read,
+      readAt: row.notification_read_at,
+      createdAt: row.notification_created_at,
+      conversationUuid: row.conversation_uuid,
+      messageUuid: row.message_uuid,
+      metadata: row.notification_metadata,
     };
   }
 }
