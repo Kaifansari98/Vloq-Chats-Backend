@@ -59,7 +59,7 @@ export class StorageService {
     this.allowedImageTypes = parseList('ALLOWED_IMAGE_TYPES', 'image/jpeg,image/png');
     this.allowedDocTypes = parseList(
       'ALLOWED_DOC_TYPES',
-      'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/zip,application/x-zip-compressed,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,audio/mpeg,audio/wav',
     );
 
     this.s3 = new S3Client({
