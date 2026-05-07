@@ -130,6 +130,7 @@ export type DirectMessageRecord = {
   updatedAt: Date;
   isOwnMessage: boolean;
   status: 'sent' | 'read';
+  readAt: Date | null;
   attachments: MessageAttachmentRecord[];
 };
 
@@ -463,6 +464,7 @@ type DirectMessageRow = {
   message_updated_at: Date;
   is_own_message: boolean;
   message_status: string;
+  message_read_at?: Date | null;
   message_attachments: AttachmentJsonRow[];
 };
 
@@ -1709,6 +1711,13 @@ export class PrismaService implements OnModuleDestroy {
             THEN 'read'
             ELSE 'sent'
           END AS message_status,
+          CASE
+            WHEN m."senderId" = $1
+              AND other_participant."lastReadMessageId" IS NOT NULL
+              AND m.id <= other_participant."lastReadMessageId"
+            THEN other_participant."lastReadAt"
+            ELSE NULL
+          END AS message_read_at,
           COALESCE(
             json_agg(
               json_build_object(
@@ -1745,7 +1754,7 @@ export class PrismaService implements OnModuleDestroy {
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
-          other_participant."lastReadMessageId"
+          other_participant."lastReadMessageId", other_participant."lastReadAt"
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, participantUserId, organizationId, directKey],
@@ -2633,6 +2642,7 @@ export class PrismaService implements OnModuleDestroy {
       updatedAt: row.message_updated_at,
       isOwnMessage: row.is_own_message,
       status: row.message_status === 'read' ? 'read' : 'sent',
+      readAt: row.message_read_at ?? null,
       attachments: (row.message_attachments ?? []).map((a) => ({
         uuid: a.uuid,
         attachmentType: a.type as MessageAttachmentRecord['attachmentType'],

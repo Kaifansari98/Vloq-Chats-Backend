@@ -257,13 +257,19 @@ export class ChatsService {
 
     await this.ensureDirectParticipant(user, data.participantUserId);
 
+    const readAt = new Date();
+
     await this.prisma.message.markDirectChatRead({
       organizationId: user.organizationId,
       currentUserId: user.id,
       participantUserId: data.participantUserId,
     });
 
-    this.chatsGateway.emitDirectMessageRead(user.id, data.participantUserId);
+    this.chatsGateway.emitDirectMessageRead(
+      user.id,
+      data.participantUserId,
+      readAt,
+    );
 
     return {
       message: 'Direct chat marked as read',

@@ -141,10 +141,10 @@ export class ChatsGateway
     });
   }
 
-  emitDirectMessageRead(readByUserId: number, notifyUserId: number): void {
+  emitDirectMessageRead(readByUserId: number, notifyUserId: number, readAt: Date): void {
     this.server
       .to(this.getUserRoom(notifyUserId))
-      .emit('direct_message:read', { readByUserId });
+      .emit('direct_message:read', { readByUserId, readAt });
   }
 
   emitGroupMessage(message: DirectMessageRecord, participantIds: number[]): void {
