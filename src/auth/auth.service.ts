@@ -17,6 +17,9 @@ export class AuthService {
 
   async login(data: LoginDto) {
     const { email, password, provider, providerId, organizationId } = data;
+
+    console.log('LOGIN PAYLOAD', data);
+
     const normalizedEmail = email.toLowerCase();
     const normalizedProviderId = providerId?.trim();
 
@@ -56,6 +59,8 @@ export class AuthService {
 
       user = users[0] ?? null;
     }
+
+    console.log('USER FOUND', user);
 
     if (!user) {
       throw new UnauthorizedException('User not found');
