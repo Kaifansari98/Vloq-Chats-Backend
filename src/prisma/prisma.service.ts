@@ -260,6 +260,12 @@ type FindUserTypeUniqueArgs = {
   };
 };
 
+type FindUserTypeByIdArgs = {
+  where: {
+    id: number;
+  };
+};
+
 type CreateAuthProviderArgs = {
   data: {
     userId: number;
@@ -528,6 +534,8 @@ export class PrismaService implements OnModuleDestroy {
   readonly userTypeMaster = {
     findUnique: async (args: FindUserTypeUniqueArgs) =>
       this.findUniqueUserType(args),
+    findById: async (args: FindUserTypeByIdArgs) =>
+      this.findUserTypeById(args),
   };
 
   readonly userAuthProvider = {
@@ -1223,6 +1231,22 @@ export class PrismaService implements OnModuleDestroy {
         LIMIT 1
       `,
       [where.code],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
+  private async findUserTypeById({
+    where,
+  }: FindUserTypeByIdArgs): Promise<UserTypeMasterRecord | null> {
+    const result = await this.pool.query<UserTypeMasterRecord>(
+      `
+        SELECT *
+        FROM "UserTypeMaster"
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [where.id],
     );
 
     return result.rows[0] ?? null;

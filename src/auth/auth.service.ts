@@ -96,6 +96,11 @@ export class AuthService {
       where: { id: user.organizationId },
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+    const userType = await this.prisma.userTypeMaster.findById({
+      where: { id: user.userTypeId },
+    });
+
     return {
       message: 'Login successful',
       accessToken: token,
@@ -107,6 +112,8 @@ export class AuthService {
         organizationName: (org?.name as string | undefined) ?? '',
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         organizationEmail: (org?.email as string | null | undefined) ?? '',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        userTypeCode: (userType?.code as string | undefined) ?? '',
       },
     };
   }
