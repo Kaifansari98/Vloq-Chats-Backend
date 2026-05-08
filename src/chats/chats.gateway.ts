@@ -23,7 +23,11 @@ type SocketJwtPayload = {
 
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:3999', 'http://127.0.0.1:3999'],
+    origin: [
+      'http://localhost:3999',
+      'http://127.0.0.1:3999',
+      'https://chat.butterflyai.io',
+    ],
     credentials: true,
   },
 })
