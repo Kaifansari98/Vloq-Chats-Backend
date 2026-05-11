@@ -33,7 +33,7 @@ export type OrganizationMasterRecord = {
   updatedAt: Date;
 };
 
-type UserTypeMasterRecord = {
+export type UserTypeMasterRecord = {
   id: number;
   uuid: string;
   name: string;

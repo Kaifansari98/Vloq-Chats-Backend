@@ -34,18 +34,27 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException();
     }
 
-    const ip = this.extractIp(request);
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
-    const blocked = await this.prisma.checkIpRestriction(
-      user.organizationId,
-      ip,
-    );
+    if (!(await this.isAdminUser(user.userTypeId))) {
+      const ip = this.extractIp(request);
+      const blocked = await this.prisma.checkIpRestriction(
+        user.organizationId,
+        ip,
+      );
 
-    if (blocked) {
-      throw new UnauthorizedException('Access restricted from this IP address');
+      if (blocked) {
+        throw new UnauthorizedException('Access restricted from this IP address');
+      }
     }
 
     return user;
+  }
+
+  private async isAdminUser(userTypeId: number): Promise<boolean> {
+    const userType = await this.prisma.userTypeMaster.findById({
+      where: { id: userTypeId },
+    });
+
+    return userType?.code === 'ADMIN';
   }
 
   private extractIp(request: Request): string {

@@ -66,18 +66,20 @@ export class ChatsGateway
         return;
       }
 
-      const ip = this.extractClientIp(client);
-      const blocked = await this.prisma.checkIpRestriction(
-        user.organizationId,
-        ip,
-      );
+      if (!(await this.isAdminUser(user.userTypeId))) {
+        const ip = this.extractClientIp(client);
+        const blocked = await this.prisma.checkIpRestriction(
+          user.organizationId,
+          ip,
+        );
 
-      if (blocked) {
-        client.emit('ip_restricted', {
-          message: 'Access restricted from this IP address',
-        });
-        client.disconnect();
-        return;
+        if (blocked) {
+          client.emit('ip_restricted', {
+            message: 'Access restricted from this IP address',
+          });
+          client.disconnect();
+          return;
+        }
       }
 
       client.data.userId = user.id;
@@ -244,6 +246,14 @@ export class ChatsGateway
         isTyping: Boolean(body.isTyping),
       });
     });
+  }
+
+  private async isAdminUser(userTypeId: number): Promise<boolean> {
+    const userType = await this.prisma.userTypeMaster.findById({
+      where: { id: userTypeId },
+    });
+
+    return userType?.code === 'ADMIN';
   }
 
   private extractClientIp(client: Socket): string {
