@@ -11,6 +11,7 @@ import {
   type GroupConversationSummaryRecord,
   type DirectMessageRecord,
   type MessageAttachmentRecord,
+  type UploadResourceType,
   type UserMasterRecord,
 } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -138,7 +139,11 @@ export class ChatsService {
       participantUserId,
     });
 
-    return { data: await this.enrichWithSignedUrls(messages) };
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    return { data: await this.enrichWithAccessUrls(messages, provider) };
   }
 
   async createDirectMessage(
@@ -205,9 +210,12 @@ export class ChatsService {
     // Wasabi folder: direct/{min}_{max} — matches the directKey convention
     const [a, b] = [user.id, data.participantUserId].sort((x, y) => x - y);
     const folder = `direct/${a}_${b}`;
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
 
     const uploaded = await Promise.all(
-      files.map((f) => this.storageService.uploadFile(f, folder)),
+      files.map((f) => this.storageService.uploadFile(f, folder, provider)),
     );
 
     const allImages = files.every((f) =>
@@ -236,7 +244,7 @@ export class ChatsService {
       attachments: attachmentInputs,
     });
 
-    const [enriched] = await this.enrichWithSignedUrls([message]);
+    const [enriched] = await this.enrichWithAccessUrls([message], provider);
 
     this.chatsGateway.emitDirectMessage(enriched, data.participantUserId);
     this.notifyOfflineUsers([data.participantUserId], enriched, 'DIRECT');
@@ -290,18 +298,26 @@ export class ChatsService {
       throw new NotFoundException('Attachment not found');
     }
 
-    const file = await this.storageService.downloadFile(attachment.url);
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+    const file = await this.storageService.downloadFile(
+      attachment.url,
+      provider,
+    );
 
     return {
       fileName: attachment.name,
-      mimeType: attachment.mimeType || file.contentType || 'application/octet-stream',
+      mimeType:
+        attachment.mimeType || file.contentType || 'application/octet-stream',
       sizeBytes: attachment.sizeBytes || file.contentLength,
       body: file.body,
     };
   }
 
-  private async enrichWithSignedUrls(
+  private async enrichWithAccessUrls(
     messages: DirectMessageRecord[],
+    provider: UploadResourceType,
   ): Promise<DirectMessageRecord[]> {
     return Promise.all(
       messages.map(async (msg): Promise<DirectMessageRecord> => {
@@ -315,7 +331,10 @@ export class ChatsService {
               att: MessageAttachmentRecord,
             ): Promise<MessageAttachmentRecord> => ({
               ...att,
-              url: await this.storageService.getSignedUrl(att.url as string),
+              url: await this.storageService.getAccessibleUrl(
+                att.url as string,
+                provider,
+              ),
             }),
           ),
         );
@@ -335,7 +354,11 @@ export class ChatsService {
       organizationId: user.organizationId,
     });
 
-    return { data: await this.enrichWithSignedUrls(messages) };
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    return { data: await this.enrichWithAccessUrls(messages, provider) };
   }
 
   async sendGroupMessage(
@@ -397,7 +420,9 @@ export class ChatsService {
 
     for (const file of files) {
       if (!this.storageService.isAllowedMimeType(file.mimetype)) {
-        throw new BadRequestException(`File type "${file.mimetype}" is not allowed`);
+        throw new BadRequestException(
+          `File type "${file.mimetype}" is not allowed`,
+        );
       }
       if (file.size > this.storageService.maxFileSize) {
         throw new BadRequestException(
@@ -407,11 +432,16 @@ export class ChatsService {
     }
 
     const folder = `group/${conversationUuid}`;
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
     const uploaded = await Promise.all(
-      files.map((f) => this.storageService.uploadFile(f, folder)),
+      files.map((f) => this.storageService.uploadFile(f, folder, provider)),
     );
 
-    const allImages = files.every((f) => this.storageService.isImageMimeType(f.mimetype));
+    const allImages = files.every((f) =>
+      this.storageService.isImageMimeType(f.mimetype),
+    );
     const messageType = allImages ? 'IMAGE' : 'FILE';
 
     const attachmentInputs = uploaded.map((uf, i) => ({
@@ -441,7 +471,7 @@ export class ChatsService {
       mentions: data.mentions ?? [],
     });
 
-    const [enriched] = await this.enrichWithSignedUrls([message]);
+    const [enriched] = await this.enrichWithAccessUrls([message], provider);
     this.chatsGateway.emitGroupMessage(enriched, participantIds);
     await this.createMentionNotifications(
       mentionRecipientIds,
@@ -468,7 +498,9 @@ export class ChatsService {
     user: UserMasterRecord,
     data: CreateGroupChatDto,
   ): Promise<{ message: string; data: GroupConversationSummaryRecord }> {
-    const uniqueMemberIds = [...new Set(data.memberIds.filter((id) => id !== user.id))];
+    const uniqueMemberIds = [
+      ...new Set(data.memberIds.filter((id) => id !== user.id)),
+    ];
 
     if (uniqueMemberIds.length === 0) {
       throw new BadRequestException('At least one other member is required');
@@ -511,6 +543,20 @@ export class ChatsService {
     }
 
     return participant;
+  }
+
+  private async getOrganizationUploadProvider(
+    organizationId: number,
+  ): Promise<UploadResourceType> {
+    const organization = await this.prisma.organizationMaster.findById({
+      where: { id: organizationId },
+    });
+
+    if (!organization) {
+      throw new NotFoundException('Organization not found');
+    }
+
+    return organization.fileUpload ?? 'SERVER_STORAGE';
   }
 
   private notifyOfflineUsers(

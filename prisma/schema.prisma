@@ -57,6 +57,11 @@ enum UserNotificationType {
   CHAT_MENTION
 }
 
+enum UploadResourceType {
+  WASABI_S3
+  SERVER_STORAGE
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Existing models
 // ─────────────────────────────────────────────────────────────
@@ -74,8 +79,9 @@ model OrganizationMaster {
 
   status OrgStatus @default(ACTIVE)
 
-  isActive               Boolean @default(true)
-  isIpRestrictionEnabled Boolean @default(false)
+  isActive               Boolean            @default(true)
+  isIpRestrictionEnabled Boolean            @default(false)
+  fileUpload             UploadResourceType @default(SERVER_STORAGE)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt

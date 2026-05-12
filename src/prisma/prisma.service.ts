@@ -29,9 +29,12 @@ export type OrganizationMasterRecord = {
   logo: string | null;
   status: string;
   isActive: boolean;
+  fileUpload: UploadResourceType;
   createdAt: Date;
   updatedAt: Date;
 };
+
+export type UploadResourceType = 'WASABI_S3' | 'SERVER_STORAGE';
 
 export type UserTypeMasterRecord = {
   id: number;
@@ -104,7 +107,7 @@ export type MessageAttachmentRecord = {
   uuid: string;
   attachmentType: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'OTHER';
   name: string;
-  url: string; // Wasabi key — replaced with signed URL by ChatsService before serving
+  url: string; // Storage key — replaced with an access URL by ChatsService before serving
   mimeType: string;
   sizeBytes: number;
 };
