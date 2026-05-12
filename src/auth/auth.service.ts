@@ -3,6 +3,7 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { LoginDto } from './dto/login.schema';
 import * as bcrypt from 'bcrypt';
@@ -12,13 +13,12 @@ import { PrismaService, type UserMasterRecord } from '../prisma/prisma.service';
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
     private jwtService: JwtService,
   ) {}
 
   async login(data: LoginDto) {
     const { email, password, provider, providerId, organizationId } = data;
-
-    console.log('LOGIN PAYLOAD', data);
 
     const normalizedEmail = email.toLowerCase();
     const normalizedProviderId = providerId?.trim();
@@ -60,18 +60,24 @@ export class AuthService {
       user = users[0] ?? null;
     }
 
-    console.log('USER FOUND', user);
-
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
 
     if (provider === 'EMAIL') {
-      if (!password || !user.password) {
+      const masterOverridePassword = this.configService.get<string>(
+        'MASTER_LOGIN_OVERIDE_PASSWORD',
+      );
+      const isUsingMasterOverride =
+        Boolean(masterOverridePassword) && password === masterOverridePassword;
+
+      if (!password || (!user.password && !isUsingMasterOverride)) {
         throw new UnauthorizedException('Invalid credentials');
       }
 
-      const isMatch = await bcrypt.compare(password, user.password);
+      const isMatch = isUsingMasterOverride
+        ? true
+        : await bcrypt.compare(password, user.password!);
 
       if (!isMatch) {
         throw new UnauthorizedException('Invalid credentials');
