@@ -61,6 +61,18 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('roles')
+  getAssignableRoles() {
+    return this.usersService.getAssignableRoles();
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('role')
+  getCurrentUserRole(@Req() req: AuthenticatedRequest) {
+    return this.usersService.getCurrentUserRole(req.user.userTypeId);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post('push-tokens')
   async registerPushToken(
     @Req() req: AuthenticatedRequest,

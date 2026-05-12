@@ -34,6 +34,31 @@ export class UsersService {
     return { data, total, page, limit };
   }
 
+  async getAssignableRoles() {
+    const [adminRole, memberRole] = await Promise.all([
+      this.prisma.userTypeMaster.findUnique({
+        where: { code: 'ADMIN' },
+      }),
+      this.prisma.userTypeMaster.findUnique({
+        where: { code: 'MEMBER' },
+      }),
+    ]);
+
+    return {
+      data: [adminRole, memberRole].filter((role) => role !== null),
+    };
+  }
+
+  async getCurrentUserRole(userTypeId: number) {
+    const role = await this.prisma.userTypeMaster.findById({
+      where: { id: userTypeId },
+    });
+
+    return {
+      userTypeCode: role?.code ?? '',
+    };
+  }
+
   async createUser(data: CreateUserDto) {
     const { email, password, provider, providerId } = data;
     const normalizedEmail = email.toLowerCase();
