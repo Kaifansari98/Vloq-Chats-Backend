@@ -1,10 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.schema';
+import type { UpdateUserDto } from './dto/update-user.schema';
 import * as bcrypt from 'bcrypt';
 import type { UserMasterRecord } from '../prisma/prisma.service';
 import type { PushTokenDto } from './dto/push-token.schema';
@@ -126,6 +129,74 @@ export class UsersService {
       message: 'User created successfully',
       data: safeUser,
     };
+  }
+
+  async updateUser(
+    admin: UserMasterRecord,
+    userUuid: string,
+    data: UpdateUserDto,
+  ) {
+    const target = await this.prisma.userMaster.findByUuid({
+      where: { uuid: userUuid, organizationId: admin.organizationId },
+    });
+
+    if (!target) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (data.email) {
+      const normalizedEmail = data.email.toLowerCase();
+      const conflict = await this.prisma.userMaster.findFirst({
+        where: {
+          email: normalizedEmail,
+          organizationId: admin.organizationId,
+        },
+      });
+      if (conflict && conflict.id !== target.id) {
+        throw new ConflictException('Email already in use in this organization');
+      }
+    }
+
+    let hashedPassword: string | undefined;
+    if (data.password) {
+      hashedPassword = await bcrypt.hash(data.password, 10);
+    }
+
+    const updated = await this.prisma.userMaster.update({
+      where: { uuid: userUuid, organizationId: admin.organizationId },
+      data: {
+        name: data.name,
+        email: data.email,
+        userTypeId: data.userTypeId,
+        password: hashedPassword ?? undefined,
+        isActive: data.isActive,
+      },
+    });
+
+    if (!updated) {
+      throw new NotFoundException('User not found');
+    }
+
+    const { password: _p, ...safe } = updated;
+    void _p;
+
+    return { message: 'User updated successfully', data: safe };
+  }
+
+  async softDeleteUser(admin: UserMasterRecord, userUuid: string) {
+    if (admin.uuid === userUuid) {
+      throw new ForbiddenException('You cannot delete your own account');
+    }
+
+    const deleted = await this.prisma.userMaster.softDelete({
+      where: { uuid: userUuid, organizationId: admin.organizationId },
+    });
+
+    if (!deleted) {
+      throw new NotFoundException('User not found');
+    }
+
+    return { message: 'User deleted successfully' };
   }
 
   async registerPushToken(user: UserMasterRecord, data: PushTokenDto) {

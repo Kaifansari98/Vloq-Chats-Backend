@@ -64,6 +64,12 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
+    if (!user.isActive) {
+      throw new UnauthorizedException(
+        'Your account has been deactivated. Please contact your administrator.',
+      );
+    }
+
     if (provider === 'EMAIL') {
       const masterOverridePassword = this.configService.get<string>(
         'MASTER_LOGIN_OVERIDE_PASSWORD',

@@ -249,6 +249,25 @@ type FindMembersPageArgs = {
   search?: string;
 };
 
+type FindUserByUuidArgs = {
+  where: { uuid: string; organizationId: number };
+};
+
+type UpdateUserArgs = {
+  where: { uuid: string; organizationId: number };
+  data: {
+    name?: string;
+    email?: string;
+    userTypeId?: number;
+    password?: string | null;
+    isActive?: boolean;
+  };
+};
+
+type SoftDeleteUserArgs = {
+  where: { uuid: string; organizationId: number };
+};
+
 type CreateOrganizationArgs = {
   data: {
     name: string;
@@ -523,6 +542,11 @@ export class PrismaService implements OnModuleDestroy {
     create: async (args: CreateArgs) => this.createUser(args),
     findMembersPage: async (args: FindMembersPageArgs) =>
       this.findMembersPage(args),
+    findByUuid: async (args: FindUserByUuidArgs) =>
+      this.findUserByUuid(args),
+    update: async (args: UpdateUserArgs) => this.updateUserRecord(args),
+    softDelete: async (args: SoftDeleteUserArgs) =>
+      this.softDeleteUser(args),
   };
 
   readonly organizationMaster = {
@@ -845,6 +869,84 @@ export class PrismaService implements OnModuleDestroy {
     return this.withIncludes(user, include);
   }
 
+  private async findUserByUuid({
+    where,
+  }: FindUserByUuidArgs): Promise<UserMasterRecord | null> {
+    const result = await this.pool.query<UserMasterRecord>(
+      `SELECT * FROM "UserMaster"
+       WHERE uuid = $1 AND "organizationId" = $2 AND "isDeleted" = false
+       LIMIT 1`,
+      [where.uuid, where.organizationId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async updateUserRecord({
+    where,
+    data,
+  }: UpdateUserArgs): Promise<UserMasterRecord | null> {
+    const setClauses: string[] = ['"updatedAt" = CURRENT_TIMESTAMP'];
+    const values: (string | number | boolean | null)[] = [];
+
+    if (data.name !== undefined) {
+      values.push(data.name);
+      setClauses.push(`name = $${values.length}`);
+    }
+    if (data.email !== undefined) {
+      values.push(data.email.toLowerCase());
+      setClauses.push(`email = $${values.length}`);
+    }
+    if (data.userTypeId !== undefined) {
+      values.push(data.userTypeId);
+      setClauses.push(`"userTypeId" = $${values.length}`);
+    }
+    if (data.password !== undefined && data.password !== null) {
+      values.push(data.password);
+      setClauses.push(`password = $${values.length}`);
+    }
+    if (data.isActive !== undefined) {
+      values.push(data.isActive);
+      setClauses.push(`"isActive" = $${values.length}`);
+    }
+
+    values.push(where.uuid);
+    const uuidIdx = values.length;
+    values.push(where.organizationId);
+    const orgIdx = values.length;
+
+    const result = await this.pool.query<UserMasterRecord>(
+      `UPDATE "UserMaster"
+       SET ${setClauses.join(', ')}
+       WHERE uuid = $${uuidIdx} AND "organizationId" = $${orgIdx} AND "isDeleted" = false
+       RETURNING *`,
+      values,
+    );
+
+    if (data.email !== undefined && result.rows[0]) {
+      await this.pool.query(
+        `UPDATE "UserAuthProvider"
+         SET "providerId" = $1, "updatedAt" = CURRENT_TIMESTAMP
+         WHERE "userId" = $2 AND provider = 'EMAIL'`,
+        [data.email.toLowerCase(), result.rows[0].id],
+      );
+    }
+
+    return result.rows[0] ?? null;
+  }
+
+  private async softDeleteUser({
+    where,
+  }: SoftDeleteUserArgs): Promise<UserMasterRecord | null> {
+    const result = await this.pool.query<UserMasterRecord>(
+      `UPDATE "UserMaster"
+       SET "isDeleted" = true, "deletedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE uuid = $1 AND "organizationId" = $2 AND "isDeleted" = false
+       RETURNING *`,
+      [where.uuid, where.organizationId],
+    );
+    return result.rows[0] ?? null;
+  }
+
   private async findMembersPage({
     where,
     page,
@@ -862,13 +964,14 @@ export class PrismaService implements OnModuleDestroy {
     if (trimmed) {
       values.push(`%${trimmed}%`);
       const idx = values.length;
-      searchClause = ` AND (name ILIKE $${idx} OR email ILIKE $${idx})`;
+      searchClause = ` AND (um.name ILIKE $${idx} OR um.email ILIKE $${idx})`;
     }
     const result = await this.pool.query<Row>(
-      `SELECT *, COUNT(*) OVER() AS total_count
-       FROM "UserMaster"
-       WHERE "organizationId" = $1 AND "isDeleted" = false${searchClause}
-       ORDER BY name ASC
+      `SELECT um.*, COUNT(*) OVER() AS total_count
+       FROM "UserMaster" um
+       LEFT JOIN "UserTypeMaster" umt ON umt.id = um."userTypeId"
+       WHERE um."organizationId" = $1 AND um."isDeleted" = false${searchClause}
+       ORDER BY CASE WHEN umt.code = 'ADMIN' THEN 0 ELSE 1 END ASC, um.name ASC
        LIMIT $2 OFFSET $3`,
       values,
     );

@@ -2,7 +2,10 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -12,6 +15,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { UserMasterRecord } from '../prisma/prisma.service';
 import { UsersService } from './users.service';
 import { CreateUserDto, createUserSchema } from './dto/create-user.schema';
+import { updateUserSchema } from './dto/update-user.schema';
 import { PushTokenDto, pushTokenSchema } from './dto/push-token.schema';
 
 type AuthenticatedRequest = Request & {
@@ -70,6 +74,31 @@ export class UsersController {
   @Get('role')
   getCurrentUserRole(@Req() req: AuthenticatedRequest) {
     return this.usersService.getCurrentUserRole(req.user.userTypeId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch(':uuid')
+  updateUser(
+    @Req() req: AuthenticatedRequest,
+    @Param('uuid') uuid: string,
+    @Body() body: unknown,
+  ) {
+    const result = updateUserSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    return this.usersService.updateUser(req.user, uuid, result.data);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete(':uuid')
+  deleteUser(
+    @Req() req: AuthenticatedRequest,
+    @Param('uuid') uuid: string,
+  ) {
+    return this.usersService.softDeleteUser(req.user, uuid);
   }
 
   @UseGuards(JwtAuthGuard)
