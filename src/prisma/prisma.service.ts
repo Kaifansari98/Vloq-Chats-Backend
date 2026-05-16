@@ -319,6 +319,7 @@ type FindGroupConversationsForUserArgs = {
   page: number;
   limit: number;
   search?: string;
+  unreadOnly?: boolean;
 };
 
 type CreateGroupConversationArgs = {
@@ -1577,31 +1578,57 @@ export class PrismaService implements OnModuleDestroy {
       filterClause = ' AND COALESCE(unread.unread_count, 0) > 0';
     }
 
-    const result = await this.pool.query<DirectConversationRow>(
-      `${this.directConversationSelect(true)}
-       WHERE my_participant."userId" = $1
-         AND my_participant."isActive" = true
-         AND c."organizationId" = $2
-         AND c.type = 'DIRECT'
-         AND c."isDeleted" = false
-         AND other_user."organizationId" = $2
-         AND other_user."isDeleted" = false
-         AND other_user."isActive" = true${filterClause}${searchClause}
-       ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
-       LIMIT $3 OFFSET $4`,
-      values,
-    );
+    const [directResult, groupResult] = await Promise.all([
+      this.pool.query<DirectConversationRow>(
+        `${this.directConversationSelect(true)}
+         WHERE my_participant."userId" = $1
+           AND my_participant."isActive" = true
+           AND c."organizationId" = $2
+           AND c.type = 'DIRECT'
+           AND c."isDeleted" = false
+           AND other_user."organizationId" = $2
+           AND other_user."isDeleted" = false
+           AND other_user."isActive" = true${filterClause}${searchClause}
+         ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
+         LIMIT $3 OFFSET $4`,
+        values,
+      ),
+      this.findGroupConversationsForUser({
+        userId,
+        organizationId,
+        page: 1,
+        limit: 1000,
+        search,
+        unreadOnly: filter === 'UNREAD',
+      }),
+    ]);
 
-    const total =
-      result.rows.length > 0
-        ? parseInt(result.rows[0].total_count ?? '0', 10)
+    const directTotal =
+      directResult.rows.length > 0
+        ? parseInt(directResult.rows[0].total_count ?? '0', 10)
         : 0;
 
-    const conversations = result.rows.map((row) =>
+    const directConversations = directResult.rows.map((row) =>
       this.mapDirectConversationRow(row),
     );
 
-    return { conversations, total };
+    const allConversations = [
+      ...directConversations,
+      ...groupResult.conversations,
+    ].sort((a, b) => {
+      const aTime = a.lastMessage?.createdAt
+        ? new Date(a.lastMessage.createdAt).getTime()
+        : new Date(a.createdAt).getTime();
+      const bTime = b.lastMessage?.createdAt
+        ? new Date(b.lastMessage.createdAt).getTime()
+        : new Date(b.createdAt).getTime();
+      return bTime - aTime;
+    });
+
+    return {
+      conversations: allConversations,
+      total: directTotal + groupResult.total,
+    };
   }
 
   private async createOrGetDirectConversation({
@@ -2550,6 +2577,7 @@ export class PrismaService implements OnModuleDestroy {
     page,
     limit,
     search,
+    unreadOnly = false,
   }: FindGroupConversationsForUserArgs): Promise<{
     conversations: GroupConversationSummaryRecord[];
     total: number;
@@ -2557,6 +2585,7 @@ export class PrismaService implements OnModuleDestroy {
     const offset = (page - 1) * limit;
     const values: Array<number | string> = [userId, organizationId, limit, offset];
     let searchClause = '';
+    const unreadClause = unreadOnly ? '\n          AND COALESCE(unread.unread_count, 0) > 0' : '';
     const trimmed = search?.trim();
 
     if (trimmed) {
@@ -2617,7 +2646,7 @@ export class PrismaService implements OnModuleDestroy {
             )
         ) AS unread ON true
         WHERE my_participant."userId" = $1
-          AND my_participant."isActive" = true${searchClause}
+          AND my_participant."isActive" = true${unreadClause}${searchClause}
         ORDER BY COALESCE(last_message."createdAt", c."createdAt") DESC, c.id DESC
         LIMIT $3 OFFSET $4
       `,
