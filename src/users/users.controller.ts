@@ -8,8 +8,12 @@ import {
   Patch,
   Post,
   Req,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { UserMasterRecord } from '../prisma/prisma.service';
@@ -17,6 +21,8 @@ import { UsersService } from './users.service';
 import { CreateUserDto, createUserSchema } from './dto/create-user.schema';
 import { updateUserSchema } from './dto/update-user.schema';
 import { PushTokenDto, pushTokenSchema } from './dto/push-token.schema';
+
+const MAX_PROFILE_PIC_BYTES = 5 * 1024 * 1024; // 5 MB
 
 type AuthenticatedRequest = Request & {
   user: UserMasterRecord;
@@ -57,11 +63,39 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get('me')
-  getProfile(@Req() req: AuthenticatedRequest) {
+  async getProfile(@Req() req: AuthenticatedRequest) {
+    const profilePicUrl = await this.usersService.resolveProfilePicUrl(req.user);
+    const { password: _pw, ...safe } = req.user;
+    void _pw;
     return {
       message: 'Authorized',
-      user: req.user,
+      user: { ...safe, profile_pic_url: profilePicUrl },
     };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('me/profile-pic')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_PROFILE_PIC_BYTES },
+    }),
+  )
+  async uploadProfilePic(
+    @Req() req: AuthenticatedRequest,
+    @UploadedFile() file: unknown,
+  ) {
+    if (!file || typeof file !== 'object') {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    const f = file as { buffer: Buffer; originalname: string; mimetype: string; size: number };
+
+    if (!f.buffer || !f.mimetype) {
+      throw new BadRequestException('Invalid file');
+    }
+
+    return this.usersService.uploadProfilePic(req.user, f);
   }
 
   @UseGuards(JwtAuthGuard)

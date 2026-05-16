@@ -90,7 +90,19 @@ export class ChatsService {
         filter,
       });
 
-    return { data: conversations, total, page, limit };
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    const data = await Promise.all(
+      conversations.map((conv) =>
+        conv.type === 'DIRECT'
+          ? this.resolveDirectConvProfilePic(conv, provider)
+          : this.resolveGroupParticipantProfilePics(conv, provider),
+      ),
+    );
+
+    return { data, total, page, limit };
   }
 
   async createOrGetDirectChat(
@@ -115,9 +127,13 @@ export class ChatsService {
         participantUserId: participant.id,
       });
 
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
     return {
       message: 'Direct chat ready',
-      data: conversation,
+      data: await this.resolveDirectConvProfilePic(conversation, provider),
     };
   }
 
@@ -522,7 +538,14 @@ export class ChatsService {
       group.uuid,
     );
 
-    return { message: 'Group created successfully', data: group };
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    return {
+      message: 'Group created successfully',
+      data: await this.resolveGroupParticipantProfilePics(group, provider),
+    };
   }
 
   private async ensureDirectParticipant(
@@ -557,6 +580,36 @@ export class ChatsService {
     }
 
     return organization.fileUpload ?? 'SERVER_STORAGE';
+  }
+
+  private async resolveDirectConvProfilePic(
+    conv: DirectConversationSummaryRecord,
+    provider: UploadResourceType,
+  ): Promise<DirectConversationSummaryRecord> {
+    const key = conv.otherParticipant.profile_pic_url;
+    if (!key) return conv;
+    const url = await this.storageService.getAccessibleUrl(key, provider);
+    return {
+      ...conv,
+      otherParticipant: { ...conv.otherParticipant, profile_pic_url: url },
+    };
+  }
+
+  private async resolveGroupParticipantProfilePics(
+    conv: GroupConversationSummaryRecord,
+    provider: UploadResourceType,
+  ): Promise<GroupConversationSummaryRecord> {
+    const participants = await Promise.all(
+      conv.participants.map(async (p) => {
+        if (!p.profile_pic_url) return p;
+        const url = await this.storageService.getAccessibleUrl(
+          p.profile_pic_url,
+          provider,
+        );
+        return { ...p, profile_pic_url: url };
+      }),
+    );
+    return { ...conv, participants };
   }
 
   private notifyOfflineUsers(

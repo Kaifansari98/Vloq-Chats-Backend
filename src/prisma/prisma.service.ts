@@ -73,6 +73,7 @@ export type DirectConversationSummaryRecord = {
     uuid: string;
     name: string;
     email: string;
+    profile_pic_url: string | null;
   };
   lastMessage: {
     uuid: string;
@@ -94,6 +95,7 @@ export type GroupConversationSummaryRecord = {
     uuid: string;
     name: string;
     email: string;
+    profile_pic_url: string | null;
   }>;
   lastMessage: {
     uuid: string;
@@ -157,6 +159,7 @@ export type UserMasterRecord = {
   email: string;
   password: string | null;
   isActive: boolean;
+  profile_pic: string | null;
   organizationId: number;
   userTypeId: number;
   createdById: number | null;
@@ -266,6 +269,11 @@ type UpdateUserArgs = {
 
 type SoftDeleteUserArgs = {
   where: { uuid: string; organizationId: number };
+};
+
+type UpdateProfilePicKeyArgs = {
+  where: { id: number };
+  key: string | null;
 };
 
 type CreateOrganizationArgs = {
@@ -449,6 +457,7 @@ type DirectConversationRow = {
   other_user_uuid: string;
   other_user_name: string;
   other_user_email: string;
+  other_user_profile_pic: string | null;
   last_message_uuid: string | null;
   last_message_content: string | null;
   last_message_type: string | null;
@@ -466,7 +475,7 @@ type GroupConversationRow = {
   last_message_content: string | null;
   last_message_type: string | null;
   last_message_created_at: Date | null;
-  participants_json: Array<{ id: number; uuid: string; name: string; email: string }> | null;
+  participants_json: Array<{ id: number; uuid: string; name: string; email: string; profile_pic: string | null }> | null;
   total_count?: string;
 };
 
@@ -547,6 +556,8 @@ export class PrismaService implements OnModuleDestroy {
     update: async (args: UpdateUserArgs) => this.updateUserRecord(args),
     softDelete: async (args: SoftDeleteUserArgs) =>
       this.softDeleteUser(args),
+    updateProfilePicKey: async (args: UpdateProfilePicKeyArgs) =>
+      this.updateProfilePicKey(args),
   };
 
   readonly organizationMaster = {
@@ -943,6 +954,20 @@ export class PrismaService implements OnModuleDestroy {
        WHERE uuid = $1 AND "organizationId" = $2 AND "isDeleted" = false
        RETURNING *`,
       [where.uuid, where.organizationId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async updateProfilePicKey({
+    where,
+    key,
+  }: UpdateProfilePicKeyArgs): Promise<UserMasterRecord | null> {
+    const result = await this.pool.query<UserMasterRecord>(
+      `UPDATE "UserMaster"
+       SET "profile_pic" = $1, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $2 AND "isDeleted" = false
+       RETURNING *`,
+      [key, where.id],
     );
     return result.rows[0] ?? null;
   }
@@ -1793,15 +1818,17 @@ export class PrismaService implements OnModuleDestroy {
     uuid: string;
     name: string;
     email: string;
+    profile_pic_url: string | null;
   }> {
     const result = await this.pool.query<{
       id: number;
       uuid: string;
       name: string;
       email: string;
+      profile_pic: string | null;
     }>(
       `
-        SELECT id, uuid, name, email
+        SELECT id, uuid, name, email, "profile_pic"
         FROM "UserMaster"
         WHERE id = $1
         LIMIT 1
@@ -1809,7 +1836,14 @@ export class PrismaService implements OnModuleDestroy {
       [userId],
     );
 
-    return result.rows[0];
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      uuid: row.uuid,
+      name: row.name,
+      email: row.email,
+      profile_pic_url: row.profile_pic,
+    };
   }
 
   private async findDirectMessages({
@@ -2215,6 +2249,7 @@ export class PrismaService implements OnModuleDestroy {
         other_user.uuid AS other_user_uuid,
         other_user.name AS other_user_name,
         other_user.email AS other_user_email,
+        other_user."profile_pic" AS other_user_profile_pic,
         COALESCE(unread.unread_count, 0) AS unread_count,
         last_message.uuid AS last_message_uuid,
         last_message.content AS last_message_content,
@@ -2547,7 +2582,8 @@ export class PrismaService implements OnModuleDestroy {
               'id', u.id,
               'uuid', u.uuid,
               'name', u.name,
-              'email', u.email
+              'email', u.email,
+              'profile_pic', u."profile_pic"
             ) ORDER BY u.name ASC)
             FROM "ConversationParticipant" cp
             INNER JOIN "UserMaster" u ON u.id = cp."userId"
@@ -2600,7 +2636,13 @@ export class PrismaService implements OnModuleDestroy {
       createdAt: row.conversation_created_at,
       updatedAt: row.conversation_updated_at,
       unreadCount: parseInt(row.unread_count, 10),
-      participants: row.participants_json ?? [],
+      participants: (row.participants_json ?? []).map((p) => ({
+        id: p.id,
+        uuid: p.uuid,
+        name: p.name,
+        email: p.email,
+        profile_pic_url: p.profile_pic,
+      })),
       lastMessage: row.last_message_uuid
         ? {
             uuid: row.last_message_uuid,
@@ -2700,9 +2742,10 @@ export class PrismaService implements OnModuleDestroy {
         uuid: string;
         name: string;
         email: string;
+        profile_pic: string | null;
       }>(
         `
-          SELECT u.id, u.uuid, u.name, u.email
+          SELECT u.id, u.uuid, u.name, u.email, u."profile_pic"
           FROM "ConversationParticipant" cp
           INNER JOIN "UserMaster" u ON u.id = cp."userId"
           WHERE cp."conversationId" = $1
@@ -2720,7 +2763,13 @@ export class PrismaService implements OnModuleDestroy {
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
         unreadCount: 0,
-        participants: participantsResult.rows,
+        participants: participantsResult.rows.map((p) => ({
+          id: p.id,
+          uuid: p.uuid,
+          name: p.name,
+          email: p.email,
+          profile_pic_url: p.profile_pic,
+        })),
         lastMessage: null,
       };
     } catch (error) {
@@ -2745,6 +2794,7 @@ export class PrismaService implements OnModuleDestroy {
         uuid: row.other_user_uuid,
         name: row.other_user_name,
         email: row.other_user_email,
+        profile_pic_url: row.other_user_profile_pic,
       },
       lastMessage: row.last_message_uuid
         ? {

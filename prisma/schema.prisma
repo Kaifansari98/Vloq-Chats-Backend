@@ -129,7 +129,8 @@ model UserMaster {
   email    String
   password String? // nullable because Google/social login users may not have password
 
-  isActive Boolean @default(true)
+  isActive    Boolean @default(true)
+  profile_pic String? // storage key – resolved to URL at serve-time
 
   organizationId Int
   userTypeId     Int
