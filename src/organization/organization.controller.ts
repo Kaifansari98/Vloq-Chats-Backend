@@ -81,6 +81,12 @@ export class OrganizationController {
     return this.orgService.addAllowedIp(req.user, data);
   }
 
+  @Delete('ip-restrictions')
+  @UseGuards(JwtAuthGuard)
+  removeAllAllowedIps(@Req() req: AuthenticatedRequest) {
+    return this.orgService.removeAllAllowedIps(req.user);
+  }
+
   @Delete('ip-restrictions/:uuid')
   @UseGuards(JwtAuthGuard)
   removeAllowedIp(

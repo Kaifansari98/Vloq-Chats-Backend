@@ -815,6 +815,13 @@ export class PrismaService implements OnModuleDestroy {
     );
   }
 
+  async removeAllAllowedIps(organizationId: number): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM "OrgRestrictedIpMapping" WHERE "organizationId" = $1`,
+      [organizationId],
+    );
+  }
+
   async checkIpRestriction(
     organizationId: number,
     rawIp: string,

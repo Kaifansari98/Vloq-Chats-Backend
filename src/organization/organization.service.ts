@@ -117,4 +117,9 @@ export class OrganizationService {
     await this.prisma.removeAllowedIp(user.organizationId, ipUuid);
     return { message: 'IP removed successfully' };
   }
+
+  async removeAllAllowedIps(user: UserMasterRecord) {
+    await this.prisma.removeAllAllowedIps(user.organizationId);
+    return { message: 'All IPs removed successfully' };
+  }
 }
