@@ -516,6 +516,7 @@ type DirectMessageRow = {
   parent_sender_name: string | null;
   parent_message_content: string | null;
   parent_message_type: string | null;
+  parent_attachment_mime_type: string | null;
 };
 
 type NotificationRow = {
@@ -1944,7 +1945,8 @@ export class PrismaService implements OnModuleDestroy {
           parent_msg.uuid    AS parent_message_uuid,
           parent_sender.name AS parent_sender_name,
           parent_msg.content AS parent_message_content,
-          parent_msg.type    AS parent_message_type
+          parent_msg.type    AS parent_message_type,
+          parent_first_att.mime_type AS parent_attachment_mime_type
         FROM "Conversation" c
         INNER JOIN "ConversationParticipant" my_participant
           ON my_participant."conversationId" = c.id
@@ -1962,6 +1964,13 @@ export class PrismaService implements OnModuleDestroy {
         LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
         LEFT JOIN "Message" parent_msg ON parent_msg.id = m."parentMessageId"
         LEFT JOIN "UserMaster" parent_sender ON parent_sender.id = parent_msg."senderId"
+        LEFT JOIN LATERAL (
+          SELECT pma."mimeType" AS mime_type
+          FROM "MessageAttachment" pma
+          WHERE pma."messageId" = parent_msg.id
+          ORDER BY pma.id ASC
+          LIMIT 1
+        ) parent_first_att ON parent_msg.id IS NOT NULL
         WHERE c."organizationId" = $3
           AND c.type = 'DIRECT'
           AND c."directKey" = $4
@@ -1971,7 +1980,8 @@ export class PrismaService implements OnModuleDestroy {
           c.uuid,
           sender.id, sender.uuid, sender.name,
           other_participant."lastReadMessageId", other_participant."lastReadAt",
-          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type
+          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type,
+          parent_first_att.mime_type
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, participantUserId, organizationId, directKey],
@@ -2244,6 +2254,7 @@ export class PrismaService implements OnModuleDestroy {
         parent_sender_name: null,
         parent_message_content: null,
         parent_message_type: null,
+        parent_attachment_mime_type: null,
       });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -2397,7 +2408,8 @@ export class PrismaService implements OnModuleDestroy {
           parent_msg.uuid    AS parent_message_uuid,
           parent_sender.name AS parent_sender_name,
           parent_msg.content AS parent_message_content,
-          parent_msg.type    AS parent_message_type
+          parent_msg.type    AS parent_message_type,
+          parent_first_att.mime_type AS parent_attachment_mime_type
         FROM "Conversation" c
         INNER JOIN "ConversationParticipant" my_participant
           ON my_participant."conversationId" = c.id
@@ -2411,6 +2423,13 @@ export class PrismaService implements OnModuleDestroy {
         LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
         LEFT JOIN "Message" parent_msg ON parent_msg.id = m."parentMessageId"
         LEFT JOIN "UserMaster" parent_sender ON parent_sender.id = parent_msg."senderId"
+        LEFT JOIN LATERAL (
+          SELECT pma."mimeType" AS mime_type
+          FROM "MessageAttachment" pma
+          WHERE pma."messageId" = parent_msg.id
+          ORDER BY pma.id ASC
+          LIMIT 1
+        ) parent_first_att ON parent_msg.id IS NOT NULL
         WHERE c.uuid = $2
           AND c.type = 'GROUP'
           AND c."isDeleted" = false
@@ -2419,7 +2438,8 @@ export class PrismaService implements OnModuleDestroy {
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
-          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type
+          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type,
+          parent_first_att.mime_type
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, conversationUuid, organizationId],
@@ -2618,6 +2638,7 @@ export class PrismaService implements OnModuleDestroy {
         parent_sender_name: null,
         parent_message_content: null,
         parent_message_type: null,
+        parent_attachment_mime_type: null,
       });
 
       return {
@@ -2929,7 +2950,11 @@ export class PrismaService implements OnModuleDestroy {
             uuid: row.parent_message_uuid,
             senderName: row.parent_sender_name ?? '',
             content: row.parent_message_content,
-            attachmentType: row.parent_message_type !== 'TEXT' ? row.parent_message_type : null,
+            attachmentType: row.parent_message_type === 'TEXT'
+              ? null
+              : row.parent_attachment_mime_type?.startsWith('audio/')
+                ? 'AUDIO'
+                : row.parent_message_type,
           }
         : null,
     };
