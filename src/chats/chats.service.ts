@@ -177,6 +177,7 @@ export class ChatsService {
       currentUserId: user.id,
       participantUserId: data.participantUserId,
       content: data.content.trim(),
+      parentMessageUuid: data.replyToMessageUuid,
     });
 
     // Text messages have no attachments — no enrichment needed
@@ -258,6 +259,7 @@ export class ChatsService {
       content: data.content?.trim() || null,
       messageType,
       attachments: attachmentInputs,
+      parentMessageUuid: data.replyToMessageUuid,
     });
 
     const [enriched] = await this.enrichWithAccessUrls([message], provider);
@@ -394,6 +396,7 @@ export class ChatsService {
       organizationId: user.organizationId,
       content: data.content.trim(),
       mentions: data.mentions ?? [],
+      parentMessageUuid: data.replyToMessageUuid,
     });
 
     this.chatsGateway.emitGroupMessage(message, participantIds);
@@ -485,6 +488,7 @@ export class ChatsService {
       messageType,
       attachments: attachmentInputs,
       mentions: data.mentions ?? [],
+      parentMessageUuid: data.replyToMessageUuid,
     });
 
     const [enriched] = await this.enrichWithAccessUrls([message], provider);

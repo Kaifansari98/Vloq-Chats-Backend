@@ -137,6 +137,12 @@ export type DirectMessageRecord = {
   status: 'sent' | 'read';
   readAt: Date | null;
   attachments: MessageAttachmentRecord[];
+  replyTo?: {
+    uuid: string;
+    senderName: string;
+    content: string | null;
+    attachmentType: string | null;
+  } | null;
 };
 
 export type UserNotificationRecord = {
@@ -363,6 +369,7 @@ type CreateDirectMessageArgs = {
   content: string | null;
   messageType?: 'TEXT' | 'IMAGE' | 'FILE';
   attachments?: DirectMessageAttachmentInput[];
+  parentMessageUuid?: string;
 };
 
 type MarkDirectChatReadArgs = {
@@ -389,6 +396,7 @@ type CreateGroupMessageArgs = {
     offset: number;
     length: number;
   }>;
+  parentMessageUuid?: string;
 };
 
 type UpsertUserPushTokenArgs = {
@@ -504,6 +512,10 @@ type DirectMessageRow = {
   message_status: string;
   message_read_at?: Date | null;
   message_attachments: AttachmentJsonRow[];
+  parent_message_uuid: string | null;
+  parent_sender_name: string | null;
+  parent_message_content: string | null;
+  parent_message_type: string | null;
 };
 
 type NotificationRow = {
@@ -1928,7 +1940,11 @@ export class PrismaService implements OnModuleDestroy {
               ) ORDER BY ma.id ASC
             ) FILTER (WHERE ma.id IS NOT NULL),
             '[]'::json
-          ) AS message_attachments
+          ) AS message_attachments,
+          parent_msg.uuid    AS parent_message_uuid,
+          parent_sender.name AS parent_sender_name,
+          parent_msg.content AS parent_message_content,
+          parent_msg.type    AS parent_message_type
         FROM "Conversation" c
         INNER JOIN "ConversationParticipant" my_participant
           ON my_participant."conversationId" = c.id
@@ -1944,6 +1960,8 @@ export class PrismaService implements OnModuleDestroy {
         INNER JOIN "UserMaster" sender
           ON sender.id = m."senderId"
         LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
+        LEFT JOIN "Message" parent_msg ON parent_msg.id = m."parentMessageId"
+        LEFT JOIN "UserMaster" parent_sender ON parent_sender.id = parent_msg."senderId"
         WHERE c."organizationId" = $3
           AND c.type = 'DIRECT'
           AND c."directKey" = $4
@@ -1952,7 +1970,8 @@ export class PrismaService implements OnModuleDestroy {
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
-          other_participant."lastReadMessageId", other_participant."lastReadAt"
+          other_participant."lastReadMessageId", other_participant."lastReadAt",
+          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, participantUserId, organizationId, directKey],
@@ -2011,6 +2030,7 @@ export class PrismaService implements OnModuleDestroy {
     content,
     messageType = 'TEXT',
     attachments = [],
+    parentMessageUuid,
   }: CreateDirectMessageArgs): Promise<DirectMessageRecord> {
     const directKey = [currentUserId, participantUserId]
       .sort((a, b) => a - b)
@@ -2091,6 +2111,15 @@ export class PrismaService implements OnModuleDestroy {
 
       const conversation = conversationResult.rows[0];
 
+      let parentMessageId: number | null = null;
+      if (parentMessageUuid) {
+        const parentResult = await client.query<{ id: number }>(
+          `SELECT id FROM "Message" WHERE uuid = $1 AND "conversationId" = $2 AND "isDeleted" = false LIMIT 1`,
+          [parentMessageUuid, conversation.id],
+        );
+        parentMessageId = parentResult.rows[0]?.id ?? null;
+      }
+
       type InsertedMessageRow = {
         message_id: number;
         message_uuid: string;
@@ -2108,6 +2137,7 @@ export class PrismaService implements OnModuleDestroy {
             "senderId",
             type,
             content,
+            "parentMessageId",
             "createdAt",
             "updatedAt"
           )
@@ -2117,6 +2147,7 @@ export class PrismaService implements OnModuleDestroy {
             $2,
             $4,
             $3,
+            $5,
             CURRENT_TIMESTAMP,
             CURRENT_TIMESTAMP
           )
@@ -2129,7 +2160,7 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt" AS message_created_at,
             "updatedAt" AS message_updated_at
         `,
-        [conversation.id, currentUserId, content, messageType],
+        [conversation.id, currentUserId, content, messageType, parentMessageId],
       );
 
       const baseMessage = messageResult.rows[0];
@@ -2209,6 +2240,10 @@ export class PrismaService implements OnModuleDestroy {
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
         })),
+        parent_message_uuid: null,
+        parent_sender_name: null,
+        parent_message_content: null,
+        parent_message_type: null,
       });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -2226,6 +2261,7 @@ export class PrismaService implements OnModuleDestroy {
           content,
           messageType,
           attachments,
+          parentMessageUuid,
         });
       }
 
@@ -2357,7 +2393,11 @@ export class PrismaService implements OnModuleDestroy {
               ) ORDER BY ma.id ASC
             ) FILTER (WHERE ma.id IS NOT NULL),
             '[]'::json
-          ) AS message_attachments
+          ) AS message_attachments,
+          parent_msg.uuid    AS parent_message_uuid,
+          parent_sender.name AS parent_sender_name,
+          parent_msg.content AS parent_message_content,
+          parent_msg.type    AS parent_message_type
         FROM "Conversation" c
         INNER JOIN "ConversationParticipant" my_participant
           ON my_participant."conversationId" = c.id
@@ -2369,6 +2409,8 @@ export class PrismaService implements OnModuleDestroy {
         INNER JOIN "UserMaster" sender
           ON sender.id = m."senderId"
         LEFT JOIN "MessageAttachment" ma ON ma."messageId" = m.id
+        LEFT JOIN "Message" parent_msg ON parent_msg.id = m."parentMessageId"
+        LEFT JOIN "UserMaster" parent_sender ON parent_sender.id = parent_msg."senderId"
         WHERE c.uuid = $2
           AND c.type = 'GROUP'
           AND c."isDeleted" = false
@@ -2376,7 +2418,8 @@ export class PrismaService implements OnModuleDestroy {
         GROUP BY
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
           c.uuid,
-          sender.id, sender.uuid, sender.name
+          sender.id, sender.uuid, sender.name,
+          parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type
         ORDER BY m."createdAt" ASC, m.id ASC
       `,
       [currentUserId, conversationUuid, organizationId],
@@ -2403,6 +2446,7 @@ export class PrismaService implements OnModuleDestroy {
     messageType = 'TEXT',
     attachments = [],
     mentions = [],
+    parentMessageUuid,
   }: CreateGroupMessageArgs): Promise<{
     message: DirectMessageRecord;
     participantIds: number[];
@@ -2442,6 +2486,15 @@ export class PrismaService implements OnModuleDestroy {
 
       const conversation = convResult.rows[0];
 
+      let parentMessageId: number | null = null;
+      if (parentMessageUuid) {
+        const parentResult = await client.query<{ id: number }>(
+          `SELECT id FROM "Message" WHERE uuid = $1 AND "conversationId" = $2 AND "isDeleted" = false LIMIT 1`,
+          [parentMessageUuid, conversation.id],
+        );
+        parentMessageId = parentResult.rows[0]?.id ?? null;
+      }
+
       type InsertedMessageRow = {
         message_id: number;
         message_uuid: string;
@@ -2454,8 +2507,8 @@ export class PrismaService implements OnModuleDestroy {
 
       const messageResult = await client.query<InsertedMessageRow>(
         `
-          INSERT INTO "Message" (uuid, "conversationId", "senderId", type, content, "createdAt", "updatedAt")
-          VALUES (gen_random_uuid(), $1, $2, $4, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          INSERT INTO "Message" (uuid, "conversationId", "senderId", type, content, "parentMessageId", "createdAt", "updatedAt")
+          VALUES (gen_random_uuid(), $1, $2, $4, $3, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
           RETURNING
             id AS message_id,
             uuid AS message_uuid,
@@ -2465,7 +2518,7 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt" AS message_created_at,
             "updatedAt" AS message_updated_at
         `,
-        [conversation.id, currentUserId, content, messageType],
+        [conversation.id, currentUserId, content, messageType, parentMessageId],
       );
 
       const baseMessage = messageResult.rows[0];
@@ -2561,6 +2614,10 @@ export class PrismaService implements OnModuleDestroy {
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
         })),
+        parent_message_uuid: null,
+        parent_sender_name: null,
+        parent_message_content: null,
+        parent_message_type: null,
       });
 
       return {
@@ -2867,6 +2924,14 @@ export class PrismaService implements OnModuleDestroy {
         mimeType: a.mimeType,
         sizeBytes: typeof a.sizeBytes === 'string' ? parseInt(a.sizeBytes, 10) : a.sizeBytes,
       })),
+      replyTo: row.parent_message_uuid
+        ? {
+            uuid: row.parent_message_uuid,
+            senderName: row.parent_sender_name ?? '',
+            content: row.parent_message_content,
+            attachmentType: row.parent_message_type !== 'TEXT' ? row.parent_message_type : null,
+          }
+        : null,
     };
   }
 
