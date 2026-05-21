@@ -17,6 +17,7 @@ import type {
   UserNotificationRecord,
 } from '../prisma/prisma.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 
 type ChatPushArgs = {
   recipientUserIds: number[];
@@ -41,6 +42,7 @@ export class NotificationsService {
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
   ) {
     const firebaseApp = this.initializeFirebaseAdmin();
     this.messaging = firebaseApp ? getMessaging(firebaseApp) : null;
@@ -49,14 +51,27 @@ export class NotificationsService {
       'http://localhost:3999';
   }
 
-  async listForUser(userId: number, page: number, limit: number) {
-    const [{ notifications, total }, unreadCount] = await Promise.all([
+  async listForUser(userId: number, organizationId: number, page: number, limit: number) {
+    const [{ notifications, total }, unreadCount, org] = await Promise.all([
       this.prisma.userNotification.listForUser({ userId, page, limit }),
       this.prisma.userNotification.countUnreadForUser({ userId }),
+      this.prisma.organizationMaster.findById({ where: { id: organizationId } }),
     ]);
 
+    const provider = org?.fileUpload ?? 'SERVER_STORAGE';
+
+    const notificationsWithPics = await Promise.all(
+      notifications.map(async (n) => {
+        if (!n.senderProfilePicKey) {
+          return { ...n, senderProfilePicUrl: null };
+        }
+        const url = await this.storageService.getAccessibleUrl(n.senderProfilePicKey, provider);
+        return { ...n, senderProfilePicUrl: url };
+      }),
+    );
+
     return {
-      data: notifications,
+      data: notificationsWithPics,
       total,
       page,
       limit,

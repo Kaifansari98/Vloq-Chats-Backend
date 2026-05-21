@@ -156,6 +156,7 @@ export type UserNotificationRecord = {
   conversationUuid: string | null;
   messageUuid: string | null;
   metadata: Record<string, unknown> | null;
+  senderProfilePicKey: string | null;
 };
 
 export type UserMasterRecord = {
@@ -530,6 +531,7 @@ type NotificationRow = {
   conversation_uuid: string | null;
   message_uuid: string | null;
   notification_metadata: Record<string, unknown> | null;
+  sender_profile_pic: string | null;
   total_count?: string;
 };
 
@@ -1229,10 +1231,12 @@ export class PrismaService implements OnModuleDestroy {
           c.uuid AS conversation_uuid,
           m.uuid AS message_uuid,
           n.metadata AS notification_metadata,
+          sender.profile_pic AS sender_profile_pic,
           COUNT(*) OVER() AS total_count
         FROM "UserNotification" n
         LEFT JOIN "Conversation" c ON c.id = n."conversationId"
         LEFT JOIN "Message" m ON m.id = n."messageId"
+        LEFT JOIN "UserMaster" sender ON sender.id = (n.metadata->>'senderId')::int
         WHERE n."userId" = $1
         ORDER BY n."createdAt" DESC, n.id DESC
         LIMIT $2 OFFSET $3
@@ -2972,6 +2976,7 @@ export class PrismaService implements OnModuleDestroy {
       conversationUuid: row.conversation_uuid,
       messageUuid: row.message_uuid,
       metadata: row.notification_metadata,
+      senderProfilePicKey: row.sender_profile_pic ?? null,
     };
   }
 }

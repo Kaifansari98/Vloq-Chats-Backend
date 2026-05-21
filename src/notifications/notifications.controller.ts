@@ -44,7 +44,7 @@ export class NotificationsController {
     const data: ListNotificationsDto = result.data;
     const page = Math.max(1, Number(data.page ?? 1) || 1);
     const limit = Math.min(50, Math.max(1, Number(data.limit ?? 10) || 10));
-    return this.notificationsService.listForUser(req.user.id, page, limit);
+    return this.notificationsService.listForUser(req.user.id, req.user.organizationId, page, limit);
   }
 
   @Get('unread-count')
