@@ -60,10 +60,13 @@ export class StorageService {
         .map((s) => s.trim())
         .filter(Boolean);
 
-    this.allowedImageTypes = parseList('ALLOWED_IMAGE_TYPES', 'image/jpeg,image/png');
+    this.allowedImageTypes = parseList(
+      'ALLOWED_IMAGE_TYPES',
+      'image/jpeg,image/png',
+    );
     this.allowedDocTypes = parseList(
       'ALLOWED_DOC_TYPES',
-      'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/zip,application/x-zip-compressed,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,audio/mpeg,audio/wav,audio/webm,audio/ogg,audio/mp4',
+      'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/zip,application/x-zip-compressed,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,audio/mpeg,audio/wav,audio/webm,audio/ogg,audio/mp4,audio/x-m4a,audio/m4a',
     );
 
     const region = this.config.get<string>('WASABI_REGION');
@@ -88,7 +91,10 @@ export class StorageService {
   }
 
   isAllowedMimeType(mimeType: string): boolean {
-    return this.allowedImageTypes.includes(mimeType) || this.allowedDocTypes.includes(mimeType);
+    return (
+      this.allowedImageTypes.includes(mimeType) ||
+      this.allowedDocTypes.includes(mimeType)
+    );
   }
 
   isImageMimeType(mimeType: string): boolean {
@@ -161,11 +167,18 @@ export class StorageService {
     }
 
     const s3 = this.getS3Client();
-    const command = new GetObjectCommand({ Bucket: this.bucket as string, Key: key });
-    // Double cast required: pnpm resolves separate copies of @smithy internals across SDK packages
-    return getSignedUrl(s3 as unknown as Parameters<typeof getSignedUrl>[0], command, {
-      expiresIn: expiresInSeconds,
+    const command = new GetObjectCommand({
+      Bucket: this.bucket as string,
+      Key: key,
     });
+    // Double cast required: pnpm resolves separate copies of @smithy internals across SDK packages
+    return getSignedUrl(
+      s3 as unknown as Parameters<typeof getSignedUrl>[0],
+      command,
+      {
+        expiresIn: expiresInSeconds,
+      },
+    );
   }
 
   async downloadFile(
@@ -193,7 +206,9 @@ export class StorageService {
     const s3 = this.getS3Client();
 
     try {
-      const result = await s3.send(new GetObjectCommand({ Bucket: this.bucket as string, Key: key }));
+      const result = await s3.send(
+        new GetObjectCommand({ Bucket: this.bucket as string, Key: key }),
+      );
       const body = result.Body as Readable | undefined;
 
       if (!body) {
@@ -227,7 +242,9 @@ export class StorageService {
     const s3 = this.getS3Client();
 
     try {
-      await s3.send(new DeleteObjectCommand({ Bucket: this.bucket as string, Key: key }));
+      await s3.send(
+        new DeleteObjectCommand({ Bucket: this.bucket as string, Key: key }),
+      );
     } catch (err) {
       throw new InternalServerErrorException(
         `Failed to delete file: ${err instanceof Error ? err.message : String(err)}`,
@@ -237,7 +254,9 @@ export class StorageService {
 
   private getS3Client(): S3Client {
     if (!this.s3 || !this.bucket) {
-      throw new InternalServerErrorException('Wasabi S3 storage is not configured');
+      throw new InternalServerErrorException(
+        'Wasabi S3 storage is not configured',
+      );
     }
 
     return this.s3;
@@ -247,7 +266,10 @@ export class StorageService {
     const normalizedKey = key.replace(/\\/g, '/').replace(/^\/+/, '');
     const fullPath = resolve(this.assetsRoot, normalizedKey);
 
-    if (fullPath !== this.assetsRoot && !fullPath.startsWith(`${this.assetsRoot}${sep}`)) {
+    if (
+      fullPath !== this.assetsRoot &&
+      !fullPath.startsWith(`${this.assetsRoot}${sep}`)
+    ) {
       throw new InternalServerErrorException('Invalid asset path');
     }
 
