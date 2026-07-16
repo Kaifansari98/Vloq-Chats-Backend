@@ -37,6 +37,11 @@ export type DownloadedFile = {
 
 @Injectable()
 export class StorageService {
+  private readonly mimeTypeAliases: Readonly<Record<string, string>> = {
+    'audio/x-m4a': 'audio/mp4',
+    'audio/m4a': 'audio/mp4',
+    'video/mp4': 'audio/mp4',
+  };
   private readonly s3: S3Client | null;
   private readonly bucket: string | null;
   private readonly maxFileSizeBytes: number;
@@ -90,15 +95,20 @@ export class StorageService {
     return this.maxFileSizeBytes;
   }
 
+  normalizeMimeType(mimeType: string): string {
+    return this.mimeTypeAliases[mimeType] ?? mimeType;
+  }
+
   isAllowedMimeType(mimeType: string): boolean {
+    const normalizedMimeType = this.normalizeMimeType(mimeType);
     return (
-      this.allowedImageTypes.includes(mimeType) ||
-      this.allowedDocTypes.includes(mimeType)
+      this.allowedImageTypes.includes(normalizedMimeType) ||
+      this.allowedDocTypes.includes(normalizedMimeType)
     );
   }
 
   isImageMimeType(mimeType: string): boolean {
-    return this.allowedImageTypes.includes(mimeType);
+    return this.allowedImageTypes.includes(this.normalizeMimeType(mimeType));
   }
 
   async uploadFile(
@@ -124,7 +134,7 @@ export class StorageService {
       return {
         key,
         url: this.buildAssetUrl(key),
-        mimeType: file.mimetype,
+        mimeType: this.normalizeMimeType(file.mimetype),
         sizeBytes: file.size,
         originalName: file.originalname,
       };
@@ -138,7 +148,7 @@ export class StorageService {
           Bucket: this.bucket as string,
           Key: key,
           Body: file.buffer,
-          ContentType: file.mimetype,
+          ContentType: this.normalizeMimeType(file.mimetype),
           ContentLength: file.size,
         }),
       );
@@ -151,7 +161,7 @@ export class StorageService {
     return {
       key,
       url: await this.getAccessibleUrl(key, provider),
-      mimeType: file.mimetype,
+      mimeType: this.normalizeMimeType(file.mimetype),
       sizeBytes: file.size,
       originalName: file.originalname,
     };

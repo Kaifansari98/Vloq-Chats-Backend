@@ -210,11 +210,16 @@ export class ChatsService {
     const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
 
     for (const file of files) {
-      if (!this.storageService.isAllowedMimeType(file.mimetype)) {
+      const normalizedMimeType = this.storageService.normalizeMimeType(
+        file.mimetype,
+      );
+
+      if (!this.storageService.isAllowedMimeType(normalizedMimeType)) {
         throw new BadRequestException(
           `File type "${file.mimetype}" is not allowed`,
         );
       }
+      file.mimetype = normalizedMimeType;
       if (file.size > this.storageService.maxFileSize) {
         throw new BadRequestException(
           `"${file.originalname}" exceeds the ${maxMb} MB size limit`,
@@ -438,11 +443,16 @@ export class ChatsService {
     const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
 
     for (const file of files) {
-      if (!this.storageService.isAllowedMimeType(file.mimetype)) {
+      const normalizedMimeType = this.storageService.normalizeMimeType(
+        file.mimetype,
+      );
+
+      if (!this.storageService.isAllowedMimeType(normalizedMimeType)) {
         throw new BadRequestException(
           `File type "${file.mimetype}" is not allowed`,
         );
       }
+      file.mimetype = normalizedMimeType;
       if (file.size > this.storageService.maxFileSize) {
         throw new BadRequestException(
           `"${file.originalname}" exceeds the ${maxMb} MB size limit`,
