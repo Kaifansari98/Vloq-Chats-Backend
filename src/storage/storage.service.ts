@@ -172,6 +172,10 @@ export class StorageService {
     provider: UploadResourceType,
     expiresInSeconds = 86400,
   ): Promise<string> {
+    if (!key) return '';
+    if (key.startsWith('http://') || key.startsWith('https://')) {
+      return key;
+    }
     if (provider === 'SERVER_STORAGE') {
       return this.buildAssetUrl(key);
     }

@@ -87,6 +87,7 @@ export type GroupConversationSummaryRecord = {
   uuid: string;
   type: 'GROUP';
   name: string;
+  avatarUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
   unreadCount: number;
@@ -2688,6 +2689,7 @@ export class PrismaService implements OnModuleDestroy {
         SELECT
           c.uuid AS conversation_uuid,
           c.name AS conversation_name,
+          c.avatar AS conversation_avatar,
           c."createdAt" AS conversation_created_at,
           c."updatedAt" AS conversation_updated_at,
           COALESCE(unread.unread_count, 0) AS unread_count,
@@ -2751,6 +2753,7 @@ export class PrismaService implements OnModuleDestroy {
       uuid: row.conversation_uuid,
       type: 'GROUP' as const,
       name: row.conversation_name ?? 'Unnamed Group',
+      avatarUrl: row.conversation_avatar ?? null,
       createdAt: row.conversation_created_at,
       updatedAt: row.conversation_updated_at,
       unreadCount: parseInt(row.unread_count, 10),
@@ -2878,6 +2881,7 @@ export class PrismaService implements OnModuleDestroy {
         uuid: conversation.uuid,
         type: 'GROUP',
         name: conversation.name ?? name,
+        avatarUrl: conversation.avatar ?? null,
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
         unreadCount: 0,

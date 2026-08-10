@@ -613,6 +613,13 @@ export class ChatsService {
     conv: GroupConversationSummaryRecord,
     provider: UploadResourceType,
   ): Promise<GroupConversationSummaryRecord> {
+    let resolvedAvatarUrl = conv.avatarUrl;
+    if (resolvedAvatarUrl) {
+      resolvedAvatarUrl = await this.storageService.getAccessibleUrl(
+        resolvedAvatarUrl,
+        provider,
+      );
+    }
     const participants = await Promise.all(
       conv.participants.map(async (p) => {
         if (!p.profile_pic_url) return p;
@@ -623,7 +630,7 @@ export class ChatsService {
         return { ...p, profile_pic_url: url };
       }),
     );
-    return { ...conv, participants };
+    return { ...conv, avatarUrl: resolvedAvatarUrl, participants };
   }
 
   private notifyOfflineUsers(
