@@ -4,7 +4,9 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
+  Put,
   Query,
   Req,
   Res,
@@ -45,6 +47,18 @@ import {
   uploadDirectMessageSchema,
   type UploadDirectMessageDto,
 } from './dto/upload-direct-message.schema';
+import {
+  editDirectMessageSchema,
+  type EditDirectMessageDto,
+} from './dto/edit-direct-message.schema';
+import {
+  editGroupMessageSchema,
+  type EditGroupMessageDto,
+} from './dto/edit-group-message.schema';
+import {
+  forwardMessageSchema,
+  type ForwardMessageDto,
+} from './dto/forward-message.schema';
 import { ChatsService } from './chats.service';
 
 type AuthenticatedRequest = Request & {
@@ -263,5 +277,60 @@ export class ChatsController {
 
     const data: MarkDirectChatReadDto = result.data;
     return this.chatsService.markDirectChatRead(req.user, data);
+  }
+
+  @Put('direct/messages/:messageUuid')
+  @Patch('direct/messages/:messageUuid')
+  async editDirectMessage(
+    @Req() req: AuthenticatedRequest,
+    @Param('messageUuid') messageUuid: string,
+    @Body() body: unknown,
+  ) {
+    const result = editDirectMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: EditDirectMessageDto = result.data;
+    return this.chatsService.editDirectMessage(req.user, messageUuid, data);
+  }
+
+  @Put('group/:conversationUuid/messages/:messageUuid')
+  @Patch('group/:conversationUuid/messages/:messageUuid')
+  async editGroupMessage(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Param('messageUuid') messageUuid: string,
+    @Body() body: unknown,
+  ) {
+    const result = editGroupMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: EditGroupMessageDto = result.data;
+    return this.chatsService.editGroupMessage(
+      req.user,
+      conversationUuid,
+      messageUuid,
+      data,
+    );
+  }
+
+  @Post('forward')
+  async forwardMessage(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: unknown,
+  ) {
+    const result = forwardMessageSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: ForwardMessageDto = result.data;
+    return this.chatsService.forwardMessage(req.user, data);
   }
 }

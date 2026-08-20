@@ -147,6 +147,14 @@ export class ChatsGateway
     });
   }
 
+  emitDirectMessageUpdated(message: DirectMessageRecord, participantUserId: number) {
+    const roomIds = new Set([message.senderId, participantUserId]);
+
+    roomIds.forEach((userId) => {
+      this.server.to(this.getUserRoom(userId)).emit('direct_message:updated', message);
+    });
+  }
+
   emitDirectMessageRead(readByUserId: number, notifyUserId: number, readAt: Date): void {
     this.server
       .to(this.getUserRoom(notifyUserId))
@@ -158,6 +166,14 @@ export class ChatsGateway
       this.server
         .to(this.getUserRoom(userId))
         .emit('group_message:new', message);
+    });
+  }
+
+  emitGroupMessageUpdated(message: DirectMessageRecord, participantIds: number[]): void {
+    participantIds.forEach((userId) => {
+      this.server
+        .to(this.getUserRoom(userId))
+        .emit('group_message:updated', message);
     });
   }
 

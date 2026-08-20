@@ -4,7 +4,12 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool, type PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
@@ -134,6 +139,9 @@ export type DirectMessageRecord = {
   type: string;
   createdAt: Date;
   updatedAt: Date;
+  isEdited?: boolean;
+  editedAt?: Date | null;
+  metadata?: Record<string, unknown> | null;
   isOwnMessage: boolean;
   status: 'sent' | 'read';
   readAt: Date | null;
@@ -372,12 +380,28 @@ type CreateDirectMessageArgs = {
   messageType?: 'TEXT' | 'IMAGE' | 'FILE';
   attachments?: DirectMessageAttachmentInput[];
   parentMessageUuid?: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 type MarkDirectChatReadArgs = {
   organizationId: number;
   currentUserId: number;
   participantUserId: number;
+};
+
+type EditDirectMessageArgs = {
+  organizationId: number;
+  currentUserId: number;
+  messageUuid: string;
+  content: string;
+};
+
+type EditGroupMessageArgs = {
+  organizationId: number;
+  currentUserId: number;
+  conversationUuid: string;
+  messageUuid: string;
+  content: string;
 };
 
 type FindGroupMessagesArgs = {
@@ -399,6 +423,7 @@ type CreateGroupMessageArgs = {
     length: number;
   }>;
   parentMessageUuid?: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 type UpsertUserPushTokenArgs = {
@@ -510,6 +535,9 @@ type DirectMessageRow = {
   message_type: string;
   message_created_at: Date;
   message_updated_at: Date;
+  is_edited?: boolean;
+  edited_at?: Date | null;
+  message_metadata?: Record<string, unknown> | null;
   is_own_message: boolean;
   message_status: string;
   message_read_at?: Date | null;
@@ -643,6 +671,10 @@ export class PrismaService implements OnModuleDestroy {
     ): Promise<DirectAttachmentAccessRecord | null>;
     createDirectMessage(args: CreateDirectMessageArgs): Promise<DirectMessageRecord>;
     markDirectChatRead(args: MarkDirectChatReadArgs): Promise<void>;
+    editDirectMessage(args: EditDirectMessageArgs): Promise<{
+      message: DirectMessageRecord;
+      participantUserId: number;
+    }>;
     findGroupMessages(args: FindGroupMessagesArgs): Promise<DirectMessageRecord[]>;
     createGroupMessage(args: CreateGroupMessageArgs): Promise<{
       message: DirectMessageRecord;
@@ -651,13 +683,30 @@ export class PrismaService implements OnModuleDestroy {
       conversationName: string;
       messageId: number;
     }>;
+    editGroupMessage(args: EditGroupMessageArgs): Promise<{
+      message: DirectMessageRecord;
+      participantIds: number[];
+    }>;
+    findSourceMessageForForward(args: {
+      organizationId: number;
+      currentUserId: number;
+      messageUuid: string;
+    }): Promise<{
+      content: string | null;
+      type: 'TEXT' | 'IMAGE' | 'FILE';
+      attachments: DirectMessageAttachmentInput[];
+      metadata: Record<string, unknown> | null;
+    } | null>;
   } = {
     findDirectMessages: (args) => this.findDirectMessages(args),
     findDirectAttachmentForUser: (args) => this.findDirectAttachmentForUser(args),
     createDirectMessage: (args) => this.createDirectMessage(args),
     markDirectChatRead: (args) => this.markDirectChatRead(args),
+    editDirectMessage: (args) => this.editDirectMessage(args),
     findGroupMessages: (args) => this.findGroupMessages(args),
     createGroupMessage: (args) => this.createGroupMessage(args),
+    editGroupMessage: (args) => this.editGroupMessage(args),
+    findSourceMessageForForward: (args) => this.findSourceMessageForForward(args),
   };
 
   async $transaction<T>(
@@ -1919,6 +1968,9 @@ export class PrismaService implements OnModuleDestroy {
           m.type         AS message_type,
           m."createdAt"  AS message_created_at,
           m."updatedAt"  AS message_updated_at,
+          m."isEdited"   AS is_edited,
+          m."editedAt"   AS edited_at,
+          m.metadata     AS message_metadata,
           (m."senderId" = $1) AS is_own_message,
           CASE
             WHEN m."senderId" = $1
@@ -1981,7 +2033,7 @@ export class PrismaService implements OnModuleDestroy {
           AND c."directKey" = $4
           AND c."isDeleted" = false
         GROUP BY
-          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
+          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."isEdited", m."editedAt", m.metadata, m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
           other_participant."lastReadMessageId", other_participant."lastReadAt",
@@ -2046,6 +2098,7 @@ export class PrismaService implements OnModuleDestroy {
     messageType = 'TEXT',
     attachments = [],
     parentMessageUuid,
+    metadata = null,
   }: CreateDirectMessageArgs): Promise<DirectMessageRecord> {
     const directKey = [currentUserId, participantUserId]
       .sort((a, b) => a - b)
@@ -2152,6 +2205,7 @@ export class PrismaService implements OnModuleDestroy {
             "senderId",
             type,
             content,
+            metadata,
             "parentMessageId",
             "createdAt",
             "updatedAt"
@@ -2162,6 +2216,7 @@ export class PrismaService implements OnModuleDestroy {
             $2,
             $4,
             $3,
+            $6,
             $5,
             CURRENT_TIMESTAMP,
             CURRENT_TIMESTAMP
@@ -2175,7 +2230,14 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt" AS message_created_at,
             "updatedAt" AS message_updated_at
         `,
-        [conversation.id, currentUserId, content, messageType, parentMessageId],
+        [
+          conversation.id,
+          currentUserId,
+          content,
+          messageType,
+          parentMessageId,
+          metadata ? JSON.stringify(metadata) : null,
+        ],
       );
 
       const baseMessage = messageResult.rows[0];
@@ -2395,6 +2457,9 @@ export class PrismaService implements OnModuleDestroy {
           m.type         AS message_type,
           m."createdAt"  AS message_created_at,
           m."updatedAt"  AS message_updated_at,
+          m."isEdited"   AS is_edited,
+          m."editedAt"   AS edited_at,
+          m.metadata     AS message_metadata,
           (m."senderId" = $1) AS is_own_message,
           'sent' AS message_status,
           COALESCE(
@@ -2440,7 +2505,7 @@ export class PrismaService implements OnModuleDestroy {
           AND c."isDeleted" = false
           AND c."organizationId" = $3
         GROUP BY
-          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."senderId",
+          m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."isEdited", m."editedAt", m.metadata, m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
           parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type,
@@ -2472,6 +2537,7 @@ export class PrismaService implements OnModuleDestroy {
     attachments = [],
     mentions = [],
     parentMessageUuid,
+    metadata = null,
   }: CreateGroupMessageArgs): Promise<{
     message: DirectMessageRecord;
     participantIds: number[];
@@ -2532,8 +2598,8 @@ export class PrismaService implements OnModuleDestroy {
 
       const messageResult = await client.query<InsertedMessageRow>(
         `
-          INSERT INTO "Message" (uuid, "conversationId", "senderId", type, content, "parentMessageId", "createdAt", "updatedAt")
-          VALUES (gen_random_uuid(), $1, $2, $4, $3, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          INSERT INTO "Message" (uuid, "conversationId", "senderId", type, content, metadata, "parentMessageId", "createdAt", "updatedAt")
+          VALUES (gen_random_uuid(), $1, $2, $4, $3, $6, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
           RETURNING
             id AS message_id,
             uuid AS message_uuid,
@@ -2543,7 +2609,14 @@ export class PrismaService implements OnModuleDestroy {
             "createdAt" AS message_created_at,
             "updatedAt" AS message_updated_at
         `,
-        [conversation.id, currentUserId, content, messageType, parentMessageId],
+        [
+          conversation.id,
+          currentUserId,
+          content,
+          messageType,
+          parentMessageId,
+          metadata ? JSON.stringify(metadata) : null,
+        ],
       );
 
       const baseMessage = messageResult.rows[0];
@@ -2942,6 +3015,9 @@ export class PrismaService implements OnModuleDestroy {
       type: row.message_type,
       createdAt: row.message_created_at,
       updatedAt: row.message_updated_at,
+      isEdited: row.is_edited ?? false,
+      editedAt: row.edited_at ?? null,
+      metadata: row.message_metadata ?? null,
       isOwnMessage: row.is_own_message,
       status: row.message_status === 'read' ? 'read' : 'sent',
       readAt: row.message_read_at ?? null,
@@ -2981,6 +3057,274 @@ export class PrismaService implements OnModuleDestroy {
       messageUuid: row.message_uuid,
       metadata: row.notification_metadata,
       senderProfilePicKey: row.sender_profile_pic ?? null,
+    };
+  }
+
+  private async editDirectMessage({
+    organizationId,
+    currentUserId,
+    messageUuid,
+    content,
+  }: EditDirectMessageArgs): Promise<{
+    message: DirectMessageRecord;
+    participantUserId: number;
+  }> {
+    const messageResult = await this.pool.query<{
+      id: number;
+      senderId: number;
+      conversationId: number;
+      createdAt: Date;
+      isDeleted: boolean;
+    }>(
+      `
+        SELECT m.id, m."senderId", m."conversationId", m."createdAt", m."isDeleted"
+        FROM "Message" m
+        JOIN "Conversation" c ON m."conversationId" = c.id
+        WHERE m.uuid = $1
+          AND c."organizationId" = $2
+          AND c.type = 'DIRECT'
+          AND m."isDeleted" = false
+        LIMIT 1
+      `,
+      [messageUuid, organizationId],
+    );
+
+    const existing = messageResult.rows[0];
+
+    if (!existing) {
+      throw new NotFoundException('Message not found');
+    }
+
+    if (existing.senderId !== currentUserId) {
+      throw new BadRequestException('You can only edit your own messages');
+    }
+
+    const EDIT_WINDOW_MS = 15 * 60 * 1000;
+    const messageAge = Date.now() - new Date(existing.createdAt).getTime();
+    if (messageAge > EDIT_WINDOW_MS) {
+      throw new BadRequestException(
+        'Messages can only be edited within 15 minutes of sending',
+      );
+    }
+
+    const participantResult = await this.pool.query<{ userId: number }>(
+      `
+        SELECT "userId"
+        FROM "ConversationParticipant"
+        WHERE "conversationId" = $1
+          AND "userId" != $2
+          AND "isActive" = true
+        LIMIT 1
+      `,
+      [existing.conversationId, currentUserId],
+    );
+
+    const participantUserId = participantResult.rows[0]?.userId ?? currentUserId;
+
+    await this.pool.query(
+      `
+        UPDATE "Message"
+        SET content = $1, "isEdited" = true, "editedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE id = $2
+      `,
+      [content.trim(), existing.id],
+    );
+
+    const messages = await this.findDirectMessages({
+      organizationId,
+      currentUserId,
+      participantUserId,
+    });
+
+    const updated = messages.find((m) => m.uuid === messageUuid);
+
+    if (!updated) {
+      throw new NotFoundException('Updated message not found');
+    }
+
+    return { message: updated, participantUserId };
+  }
+
+  private async editGroupMessage({
+    organizationId,
+    currentUserId,
+    conversationUuid,
+    messageUuid,
+    content,
+  }: EditGroupMessageArgs): Promise<{
+    message: DirectMessageRecord;
+    participantIds: number[];
+  }> {
+    const convResult = await this.pool.query<{ id: number }>(
+      `
+        SELECT id
+        FROM "Conversation"
+        WHERE uuid = $1
+          AND "organizationId" = $2
+          AND type = 'GROUP'
+          AND "isDeleted" = false
+        LIMIT 1
+      `,
+      [conversationUuid, organizationId],
+    );
+
+    const conversation = convResult.rows[0];
+
+    if (!conversation) {
+      throw new NotFoundException('Group conversation not found');
+    }
+
+    const memberResult = await this.pool.query<{ id: number }>(
+      `
+        SELECT id
+        FROM "ConversationParticipant"
+        WHERE "conversationId" = $1
+          AND "userId" = $2
+          AND "isActive" = true
+        LIMIT 1
+      `,
+      [conversation.id, currentUserId],
+    );
+
+    if (memberResult.rows.length === 0) {
+      throw new BadRequestException('You are not an active member of this group');
+    }
+
+    const messageResult = await this.pool.query<{
+      id: number;
+      senderId: number;
+      createdAt: Date;
+    }>(
+      `
+        SELECT id, "senderId", "createdAt"
+        FROM "Message"
+        WHERE uuid = $1
+          AND "conversationId" = $2
+          AND "isDeleted" = false
+        LIMIT 1
+      `,
+      [messageUuid, conversation.id],
+    );
+
+    const existing = messageResult.rows[0];
+
+    if (!existing) {
+      throw new NotFoundException('Message not found');
+    }
+
+    if (existing.senderId !== currentUserId) {
+      throw new BadRequestException('You can only edit your own messages');
+    }
+
+    const EDIT_WINDOW_MS = 15 * 60 * 1000;
+    const messageAge = Date.now() - new Date(existing.createdAt).getTime();
+    if (messageAge > EDIT_WINDOW_MS) {
+      throw new BadRequestException(
+        'Messages can only be edited within 15 minutes of sending',
+      );
+    }
+
+    await this.pool.query(
+      `
+        UPDATE "Message"
+        SET content = $1, "isEdited" = true, "editedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE id = $2
+      `,
+      [content.trim(), existing.id],
+    );
+
+    const participantsResult = await this.pool.query<{ userId: number }>(
+      `
+        SELECT "userId"
+        FROM "ConversationParticipant"
+        WHERE "conversationId" = $1
+          AND "isActive" = true
+      `,
+      [conversation.id],
+    );
+
+    const participantIds = participantsResult.rows.map((r) => r.userId);
+
+    const messages = await this.findGroupMessages({
+      organizationId,
+      currentUserId,
+      conversationUuid,
+    });
+
+    const updated = messages.find((m) => m.uuid === messageUuid);
+
+    if (!updated) {
+      throw new NotFoundException('Updated message not found');
+    }
+
+    return { message: updated, participantIds };
+  }
+
+  private async findSourceMessageForForward({
+    organizationId,
+    currentUserId,
+    messageUuid,
+  }: {
+    organizationId: number;
+    currentUserId: number;
+    messageUuid: string;
+  }): Promise<{
+    content: string | null;
+    type: 'TEXT' | 'IMAGE' | 'FILE';
+    attachments: DirectMessageAttachmentInput[];
+    metadata: Record<string, unknown> | null;
+  } | null> {
+    const msgResult = await this.pool.query<{
+      id: number;
+      content: string | null;
+      type: string;
+      metadata: Record<string, unknown> | null;
+    }>(
+      `
+        SELECT m.id, m.content, m.type, m.metadata
+        FROM "Message" m
+        JOIN "Conversation" c ON c.id = m."conversationId"
+        JOIN "ConversationParticipant" cp ON cp."conversationId" = c.id AND cp."userId" = $1 AND cp."isActive" = true
+        WHERE m.uuid = $2 AND c."organizationId" = $3 AND m."isDeleted" = false AND c."isDeleted" = false
+        LIMIT 1
+      `,
+      [currentUserId, messageUuid, organizationId],
+    );
+
+    const row = msgResult.rows[0];
+    if (!row) return null;
+
+    const attsResult = await this.pool.query<{
+      uuid: string;
+      type: string;
+      name: string;
+      url: string;
+      mimeType: string;
+      size: number;
+    }>(
+      `
+        SELECT uuid, type, name, url, "mimeType", size
+        FROM "MessageAttachment"
+        WHERE "messageId" = $1
+        ORDER BY id ASC
+      `,
+      [row.id],
+    );
+
+    const attachments: DirectMessageAttachmentInput[] = attsResult.rows.map((att) => ({
+      uuid: randomUUID(),
+      attachmentType: att.type === 'IMAGE' ? 'IMAGE' : 'DOCUMENT',
+      name: att.name,
+      key: att.url,
+      mimeType: att.mimeType,
+      sizeBytes: typeof att.size === 'string' ? parseInt(att.size, 10) : att.size,
+    }));
+
+    return {
+      content: row.content,
+      type: (row.type as 'TEXT' | 'IMAGE' | 'FILE') || 'TEXT',
+      attachments,
+      metadata: row.metadata ?? null,
     };
   }
 }

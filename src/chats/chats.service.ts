@@ -24,6 +24,9 @@ import type { CreateGroupMessageDto } from './dto/create-group-message.schema';
 import type { UploadGroupMessageDto } from './dto/upload-group-message.schema';
 import type { MarkDirectChatReadDto } from './dto/mark-direct-chat-read.schema';
 import type { UploadDirectMessageDto } from './dto/upload-direct-message.schema';
+import type { EditDirectMessageDto } from './dto/edit-direct-message.schema';
+import type { EditGroupMessageDto } from './dto/edit-group-message.schema';
+import type { ForwardMessageDto } from './dto/forward-message.schema';
 
 type UploadFile = {
   buffer: Buffer;
@@ -702,5 +705,165 @@ export class ChatsService {
         this.chatsGateway.emitNotification(mentionedUserId, notification);
       }
     });
+  }
+
+  async editDirectMessage(
+    user: UserMasterRecord,
+    messageUuid: string,
+    data: EditDirectMessageDto,
+  ): Promise<DirectMessageResponse> {
+    const { message, participantUserId } =
+      await this.prisma.message.editDirectMessage({
+        organizationId: user.organizationId,
+        currentUserId: user.id,
+        messageUuid,
+        content: data.content,
+      });
+
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+    const [enriched] = await this.enrichWithAccessUrls([message], provider);
+
+    this.chatsGateway.emitDirectMessageUpdated(enriched, participantUserId);
+
+    return {
+      message: 'Message updated successfully',
+      data: enriched,
+    };
+  }
+
+  async editGroupMessage(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    messageUuid: string,
+    data: EditGroupMessageDto,
+  ): Promise<DirectMessageResponse> {
+    const { message, participantIds } =
+      await this.prisma.message.editGroupMessage({
+        organizationId: user.organizationId,
+        currentUserId: user.id,
+        conversationUuid,
+        messageUuid,
+        content: data.content,
+      });
+
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+    const [enriched] = await this.enrichWithAccessUrls([message], provider);
+
+    this.chatsGateway.emitGroupMessageUpdated(enriched, participantIds);
+
+    return {
+      message: 'Group message updated successfully',
+      data: enriched,
+    };
+  }
+
+  async forwardMessage(
+    user: UserMasterRecord,
+    data: ForwardMessageDto,
+  ): Promise<{ message: string; forwardedCount: number }> {
+    const {
+      messageUuid,
+      targetDirectParticipantUserIds = [],
+      targetGroupConversationUuids = [],
+    } = data;
+
+    if (
+      targetDirectParticipantUserIds.length === 0 &&
+      targetGroupConversationUuids.length === 0
+    ) {
+      throw new BadRequestException(
+        'At least one target chat must be selected to forward',
+      );
+    }
+
+    const source = await this.prisma.message.findSourceMessageForForward({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      messageUuid,
+    });
+
+    if (!source) {
+      throw new NotFoundException('Source message not found');
+    }
+
+    const forwardedMetadata = {
+      ...(source.metadata || {}),
+      isForwarded: true,
+    };
+
+    let forwardedCount = 0;
+
+    // 1. Forward to Direct Chats
+    for (const participantUserId of targetDirectParticipantUserIds) {
+      if (participantUserId === user.id) continue;
+      try {
+        await this.ensureDirectParticipant(user, participantUserId);
+
+        const newMessage = await this.prisma.message.createDirectMessage({
+          organizationId: user.organizationId,
+          currentUserId: user.id,
+          participantUserId,
+          content: source.content,
+          messageType: source.type,
+          attachments: source.attachments,
+          metadata: forwardedMetadata,
+        });
+
+        const provider = await this.getOrganizationUploadProvider(
+          user.organizationId,
+        );
+        const [enriched] = await this.enrichWithAccessUrls(
+          [newMessage],
+          provider,
+        );
+
+        this.chatsGateway.emitDirectMessage(enriched, participantUserId);
+        this.notifyOfflineUsers([participantUserId], enriched, 'DIRECT');
+        forwardedCount++;
+      } catch (err) {
+        console.error(`Forward direct message error for user ${participantUserId}:`, err);
+      }
+    }
+
+    // 2. Forward to Group Chats
+    for (const groupUuid of targetGroupConversationUuids) {
+      try {
+        const { message, participantIds, conversationName } =
+          await this.prisma.message.createGroupMessage({
+            conversationUuid: groupUuid,
+            currentUserId: user.id,
+            organizationId: user.organizationId,
+            content: source.content,
+            messageType: source.type,
+            attachments: source.attachments,
+            metadata: forwardedMetadata,
+          });
+
+        const provider = await this.getOrganizationUploadProvider(
+          user.organizationId,
+        );
+        const [enriched] = await this.enrichWithAccessUrls([message], provider);
+
+        this.chatsGateway.emitGroupMessage(enriched, participantIds);
+        this.notifyOfflineUsers(
+          participantIds,
+          enriched,
+          'GROUP',
+          conversationName,
+        );
+        forwardedCount++;
+      } catch (err) {
+        console.error(`Forward group message error for group ${groupUuid}:`, err);
+      }
+    }
+
+    return {
+      message: 'Message forwarded successfully',
+      forwardedCount,
+    };
   }
 }
