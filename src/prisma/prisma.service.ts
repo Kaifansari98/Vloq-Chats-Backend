@@ -194,7 +194,9 @@ type UserPushTokenRecord = {
   userId: number;
   token: string;
   platform: string;
+  deviceId: string | null;
   userAgent: string | null;
+  isActive: boolean;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -431,7 +433,8 @@ type UpsertUserPushTokenArgs = {
     userId: number;
     token: string;
     platform: string;
-    userAgent: string | null;
+    deviceId?: string | null;
+    userAgent?: string | null;
   };
 };
 
@@ -1117,15 +1120,19 @@ export class PrismaService implements OnModuleDestroy {
           "userId",
           "token",
           "platform",
+          "deviceId",
           "userAgent",
+          "isActive",
           "lastSeenAt"
         )
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, true, NOW())
         ON CONFLICT ("token")
         DO UPDATE SET
           "userId" = EXCLUDED."userId",
           "platform" = EXCLUDED."platform",
-          "userAgent" = EXCLUDED."userAgent",
+          "deviceId" = COALESCE(EXCLUDED."deviceId", "UserPushToken"."deviceId"),
+          "userAgent" = COALESCE(EXCLUDED."userAgent", "UserPushToken"."userAgent"),
+          "isActive" = true,
           "lastSeenAt" = NOW(),
           "updatedAt" = NOW()
         RETURNING
@@ -1134,7 +1141,9 @@ export class PrismaService implements OnModuleDestroy {
           "userId",
           token,
           platform,
+          "deviceId",
           "userAgent",
+          "isActive",
           "lastSeenAt",
           "createdAt",
           "updatedAt"
@@ -1144,7 +1153,8 @@ export class PrismaService implements OnModuleDestroy {
         data.userId,
         data.token,
         data.platform,
-        data.userAgent,
+        data.deviceId || null,
+        data.userAgent || null,
       ],
     );
 
@@ -1156,7 +1166,8 @@ export class PrismaService implements OnModuleDestroy {
   }: DeleteUserPushTokenArgs): Promise<void> {
     await this.pool.query(
       `
-        DELETE FROM "UserPushToken"
+        UPDATE "UserPushToken"
+        SET "isActive" = false, "updatedAt" = NOW()
         WHERE "userId" = $1
           AND token = $2
       `,
@@ -1179,12 +1190,15 @@ export class PrismaService implements OnModuleDestroy {
           "userId",
           token,
           platform,
+          "deviceId",
           "userAgent",
+          "isActive",
           "lastSeenAt",
           "createdAt",
           "updatedAt"
         FROM "UserPushToken"
         WHERE "userId" = ANY($1::int[])
+          AND "isActive" = true
       `,
       [userIds],
     );
@@ -1201,7 +1215,8 @@ export class PrismaService implements OnModuleDestroy {
 
     await this.pool.query(
       `
-        DELETE FROM "UserPushToken"
+        UPDATE "UserPushToken"
+        SET "isActive" = false, "updatedAt" = NOW()
         WHERE token = ANY($1::text[])
       `,
       [tokens],

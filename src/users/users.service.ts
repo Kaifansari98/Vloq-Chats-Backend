@@ -229,6 +229,7 @@ export class UsersService {
         userId: user.id,
         token: data.token.trim(),
         platform: data.platform ? data.platform.toUpperCase() : 'ANDROID',
+        deviceId: data.deviceId?.trim() || null,
         userAgent: data.userAgent?.trim() || null,
       },
     });

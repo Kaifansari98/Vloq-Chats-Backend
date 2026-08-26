@@ -146,23 +146,34 @@ export class NotificationsService {
     conversationType,
     conversationName,
   }: ChatPushArgs): Promise<void> {
-    const title =
-      conversationType === 'GROUP'
-        ? conversationName || 'New group message'
-        : message.senderName;
+    const isGroup = conversationType === 'GROUP';
+    const title = isGroup
+      ? conversationName || 'New group message'
+      : message.senderName;
     const body = this.buildMessageBody(message, conversationType);
     const link = `${this.appUrl}/?chat=${encodeURIComponent(message.conversationUuid)}`;
+
+    const dataPayload: Record<string, string> = {
+      type: isGroup ? 'group_message' : 'chat_message',
+      chatType: isGroup ? 'group' : 'direct',
+      conversationId: message.conversationUuid,
+      messageId: message.uuid,
+      senderId: String(message.senderId),
+      senderName: message.senderName,
+    };
+
+    if (isGroup) {
+      dataPayload.groupId = message.conversationUuid;
+      if (conversationName) {
+        dataPayload.conversationName = conversationName;
+      }
+    }
 
     await this.sendPushToUsers(recipientUserIds, {
       title,
       body,
       link,
-      data: {
-        conversationType,
-        conversationUuid: message.conversationUuid,
-        senderId: String(message.senderId),
-        senderName: message.senderName,
-      },
+      data: dataPayload,
     });
   }
 
@@ -180,10 +191,15 @@ export class NotificationsService {
       body: `${conversationName}: ${body}`,
       link: `${this.appUrl}/?chat=${encodeURIComponent(message.conversationUuid)}`,
       data: {
-        conversationType: 'GROUP',
-        conversationUuid: message.conversationUuid,
+        type: 'group_message',
+        chatType: 'group',
+        conversationId: message.conversationUuid,
+        groupId: message.conversationUuid,
+        messageId: message.uuid,
         senderId: String(message.senderId),
         senderName: message.senderName,
+        conversationName,
+        isMention: 'true',
       },
     });
   }
@@ -210,11 +226,11 @@ export class NotificationsService {
     }
 
     try {
-      const tokens = await this.prisma.userPushToken.findTokensByUserIds({
+      const dbTokens = await this.prisma.userPushToken.findTokensByUserIds({
         userIds,
       });
 
-      if (tokens.length === 0) {
+      if (dbTokens.length === 0) {
         console.warn(
           `⚠️ [FCM BACKEND WARNING] No FCM Push Tokens found in DB for user IDs: [${userIds.join(
             ', ',
@@ -223,89 +239,114 @@ export class NotificationsService {
         return;
       }
 
+      // Deduplicate tokens
+      const uniqueTokens = [...new Set(dbTokens.map((item) => item.token))];
+
       console.log(
-        `🚀 [FCM BACKEND] Sending FCM Push Notification to ${tokens.length} token(s) for user IDs: [${userIds.join(
+        `🚀 [FCM BACKEND] Sending FCM Push Notification to ${uniqueTokens.length} unique token(s) for user IDs: [${userIds.join(
           ', ',
         )}]`,
       );
       console.log(`   Title: "${payload.title}" | Body: "${payload.body}"`);
 
-      const multicastPayload: MulticastMessage = {
-        tokens: tokens.map((item) => item.token),
-        notification: {
-          title: payload.title,
-          body: payload.body,
-        },
-        data: payload.data,
-        android: {
-          priority: 'high',
+      // FCM Multicast limit is 500 tokens per request. Chunk tokens into batches of 500.
+      const BATCH_SIZE = 500;
+      const chunks: string[][] = [];
+      for (let i = 0; i < uniqueTokens.length; i += BATCH_SIZE) {
+        chunks.push(uniqueTokens.slice(i, i + BATCH_SIZE));
+      }
+
+      const invalidTokensToCleanup: string[] = [];
+
+      for (const tokenChunk of chunks) {
+        const multicastPayload: MulticastMessage = {
+          tokens: tokenChunk,
           notification: {
-            channelId: 'messages',
             title: payload.title,
             body: payload.body,
-            sound: 'default',
-            priority: 'high',
-            defaultVibrateTimings: true,
-            defaultLightSettings: true,
-            visibility: 'public',
           },
-        },
-        apns: {
-          payload: {
-            aps: {
-              alert: {
-                title: payload.title,
-                body: payload.body,
-              },
+          data: {
+            ...payload.data,
+            title: payload.title,
+            body: payload.body,
+            categoryId: 'message',
+            category: 'message',
+            _category: 'message',
+            categoryIdentifier: 'message',
+          },
+          android: {
+            priority: 'high',
+            notification: {
+              channelId: 'messages',
+              title: payload.title,
+              body: payload.body,
               sound: 'default',
-              badge: 1,
+              priority: 'high',
+              clickAction: 'message',
+              tag: 'message',
+              defaultVibrateTimings: true,
+              defaultLightSettings: true,
+              visibility: 'public',
             },
           },
-        },
-        webpush: {
-          fcmOptions: {
-            link: payload.link,
+          apns: {
+            payload: {
+              aps: {
+                alert: {
+                  title: payload.title,
+                  body: payload.body,
+                },
+                category: 'message',
+                sound: 'default',
+                badge: 1,
+              },
+            },
           },
-        },
-      };
+          webpush: {
+            fcmOptions: {
+              link: payload.link,
+            },
+          },
+        };
 
-      const response = await this.messaging.sendEachForMulticast(
-        multicastPayload,
-      );
-
-      console.log(
-        `✅ [FCM BACKEND SUCCESS] Multicast result: ${response.successCount} succeeded, ${response.failureCount} failed.`,
-      );
-
-      const invalidTokens = response.responses.flatMap((result, index) => {
-        if (result.success) {
-          return [];
-        }
-
-        const code = result.error?.code;
-        console.warn(
-          `❌ [FCM BACKEND ERROR] Token [${multicastPayload.tokens[index]?.slice(
-            0,
-            20,
-          )}...] failed to deliver: ${result.error?.message} (code: ${code})`,
+        const response = await this.messaging.sendEachForMulticast(
+          multicastPayload,
         );
 
-        if (
-          code === 'messaging/invalid-registration-token' ||
-          code === 'messaging/registration-token-not-registered'
-        ) {
-          return [multicastPayload.tokens[index] as string];
-        }
+        console.log(
+          `✅ [FCM BACKEND SUCCESS] Multicast batch result: ${response.successCount} succeeded, ${response.failureCount} failed.`,
+        );
 
-        return [];
-      });
+        response.responses.forEach((result, index) => {
+          if (!result.success) {
+            const code = result.error?.code;
+            console.warn(
+              `❌ [FCM BACKEND ERROR] Token [${tokenChunk[index]?.slice(
+                0,
+                20,
+              )}...] failed: ${result.error?.message} (code: ${code})`,
+            );
 
-      if (invalidTokens.length > 0) {
+            if (
+              code === 'messaging/invalid-registration-token' ||
+              code === 'messaging/registration-token-not-registered'
+            ) {
+              const badToken = tokenChunk[index];
+              if (badToken) {
+                invalidTokensToCleanup.push(badToken);
+              }
+            }
+          }
+        });
+      }
+
+      if (invalidTokensToCleanup.length > 0) {
+        const uniqueBadTokens = [...new Set(invalidTokensToCleanup)];
         await this.prisma.userPushToken.deleteManyByTokens({
-          tokens: invalidTokens,
+          tokens: uniqueBadTokens,
         });
         console.log(
-          `🧹 [FCM BACKEND] Cleaned up ${invalidTokens.length} expired/invalid FCM tokens from DB.`,
+          `🧹 [FCM BACKEND] Cleaned up ${uniqueBadTokens.length} expired/invalid FCM tokens from DB.`,
         );
       }
     } catch (error) {
