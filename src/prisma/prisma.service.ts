@@ -365,7 +365,7 @@ type FindDirectAttachmentForUserArgs = {
 
 type DirectMessageAttachmentInput = {
   uuid: string;
-  attachmentType: 'IMAGE' | 'DOCUMENT';
+  attachmentType: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'OTHER';
   name: string;
   key: string; // Wasabi key — stored in the url column of MessageAttachment
   mimeType: string;
@@ -662,6 +662,29 @@ export class PrismaService implements OnModuleDestroy {
     createGroupConversation: async (
       args: CreateGroupConversationArgs,
     ) => this.createGroupConversation(args),
+    findGroupDetails: async (args: {
+      organizationId: number;
+      currentUserId: number;
+      conversationUuid: string;
+    }) => this.findGroupDetails(args),
+    findGroupMedia: async (args: {
+      organizationId: number;
+      currentUserId: number;
+      conversationUuid: string;
+      type: 'media' | 'docs' | 'links' | 'all';
+    }) => this.findGroupMedia(args),
+    addGroupMembers: async (args: {
+      organizationId: number;
+      currentUserId: number;
+      conversationUuid: string;
+      memberIds: number[];
+    }) => this.addGroupMembers(args),
+    removeGroupMember: async (args: {
+      organizationId: number;
+      currentUserId: number;
+      conversationUuid: string;
+      memberId: number;
+    }) => this.removeGroupMember(args),
   };
 
   readonly message: {
@@ -2975,6 +2998,383 @@ export class PrismaService implements OnModuleDestroy {
     }
   }
 
+  async findGroupDetails({
+    organizationId,
+    currentUserId,
+    conversationUuid,
+  }: {
+    organizationId: number;
+    currentUserId: number;
+    conversationUuid: string;
+  }) {
+    const convResult = await this.pool.query<{
+      id: number;
+      uuid: string;
+      name: string;
+      avatar: string | null;
+      createdById: number;
+      createdAt: Date;
+      updatedAt: Date;
+    }>(
+      `
+        SELECT c.id, c.uuid, c.name, c.avatar, c."createdById", c."createdAt", c."updatedAt"
+        FROM "Conversation" c
+        WHERE c.uuid = $1 
+          AND c."organizationId" = $2 
+          AND c.type = 'GROUP' 
+          AND c."isDeleted" = false
+          AND (
+            EXISTS (
+              SELECT 1 FROM "ConversationParticipant" cp 
+              WHERE cp."conversationId" = c.id AND cp."userId" = $3 AND cp."isActive" = true
+            )
+            OR c."createdById" = $3
+          )
+      `,
+      [conversationUuid, organizationId, currentUserId],
+    );
+
+    if (convResult.rows.length === 0) {
+      throw new NotFoundException('Group conversation not found or access denied');
+    }
+
+    const conversation = convResult.rows[0];
+
+    const participantsResult = await this.pool.query<{
+      id: number;
+      uuid: string;
+      name: string;
+      email: string;
+      profile_pic: string | null;
+      userTypeCode: string;
+      role: string;
+    }>(
+      `
+        SELECT u.id, u.uuid, u.name, u.email, u."profile_pic", COALESCE(umt.code, 'USER') AS "userTypeCode", cp.role
+        FROM "ConversationParticipant" cp
+        INNER JOIN "UserMaster" u ON u.id = cp."userId"
+        LEFT JOIN "UserTypeMaster" umt ON umt.id = u."userTypeId"
+        WHERE cp."conversationId" = $1 
+          AND cp."isActive" = true 
+          AND u."isDeleted" = false
+        ORDER BY (CASE WHEN cp.role = 'OWNER' OR u.id = $2 THEN 0 ELSE 1 END), u.name ASC
+      `,
+      [conversation.id, conversation.createdById],
+    );
+
+    const countsResult = await this.pool.query<{
+      mediaCount: string;
+      docsCount: string;
+    }>(
+      `
+        SELECT 
+          COUNT(CASE WHEN ma."mimeType" LIKE 'image/%' OR ma."mimeType" LIKE 'video/%' THEN 1 END) AS "mediaCount",
+          COUNT(CASE WHEN ma."mimeType" NOT LIKE 'image/%' AND ma."mimeType" NOT LIKE 'video/%' THEN 1 END) AS "docsCount"
+        FROM "Message" m
+        INNER JOIN "MessageAttachment" ma ON ma."messageId" = m.id
+        WHERE m."conversationId" = $1 AND m."isDeleted" = false
+      `,
+      [conversation.id],
+    );
+
+    const linksResult = await this.pool.query<{ count: string }>(
+      `
+        SELECT COUNT(*) AS count 
+        FROM "Message" m
+        WHERE m."conversationId" = $1 
+          AND (m.content LIKE '%http://%' OR m.content LIKE '%https://%') 
+          AND m."isDeleted" = false
+      `,
+      [conversation.id],
+    );
+
+    const mediaCount = parseInt(countsResult.rows[0]?.mediaCount ?? '0', 10);
+    const docsCount = parseInt(countsResult.rows[0]?.docsCount ?? '0', 10);
+    const linksCount = parseInt(linksResult.rows[0]?.count ?? '0', 10);
+
+    return {
+      id: conversation.id,
+      uuid: conversation.uuid,
+      type: 'GROUP' as const,
+      name: conversation.name,
+      avatarUrl: conversation.avatar ?? null,
+      creatorId: conversation.createdById,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      mediaCount,
+      docsCount,
+      linksCount,
+      participants: participantsResult.rows.map((p) => ({
+        id: p.id,
+        uuid: p.uuid,
+        name: p.name,
+        email: p.email,
+        profile_pic_url: p.profile_pic,
+        userTypeCode: p.userTypeCode,
+        role: p.role,
+        isAdmin: p.role === 'OWNER' || p.id === conversation.createdById,
+      })),
+    };
+  }
+
+  async findGroupMedia({
+    organizationId,
+    currentUserId,
+    conversationUuid,
+    type,
+  }: {
+    organizationId: number;
+    currentUserId: number;
+    conversationUuid: string;
+    type: 'media' | 'docs' | 'links' | 'all';
+  }) {
+    const convResult = await this.pool.query<{ id: number }>(
+      `
+        SELECT c.id
+        FROM "Conversation" c
+        WHERE c.uuid = $1 
+          AND c."organizationId" = $2 
+          AND c.type = 'GROUP' 
+          AND c."isDeleted" = false
+          AND (
+            EXISTS (
+              SELECT 1 FROM "ConversationParticipant" cp 
+              WHERE cp."conversationId" = c.id AND cp."userId" = $3 AND cp."isActive" = true
+            )
+            OR c."createdById" = $3
+          )
+      `,
+      [conversationUuid, organizationId, currentUserId],
+    );
+
+    if (convResult.rows.length === 0) {
+      throw new NotFoundException('Group conversation not found');
+    }
+
+    const conversationId = convResult.rows[0].id;
+    const mediaList: Array<{
+      id: string;
+      type: 'IMAGE' | 'VIDEO' | 'FILE' | 'LINK';
+      url: string;
+      name: string;
+      sizeBytes: number;
+      mimeType: string;
+      createdAt: Date;
+      senderName: string;
+    }> = [];
+
+    if (type === 'all' || type === 'media' || type === 'docs') {
+      const attachmentsResult = await this.pool.query<{
+        uuid: string;
+        fileName: string;
+        fileType: string;
+        mimeType: string;
+        fileSizeBytes: number;
+        storageKey: string;
+        createdAt: Date;
+        senderName: string;
+      }>(
+        `
+          SELECT 
+            ma.uuid, ma."fileName", ma."fileType", ma."mimeType", 
+            ma."fileSizeBytes", ma."storageKey", ma."createdAt",
+            u.name AS "senderName"
+          FROM "MessageAttachment" ma
+          INNER JOIN "Message" m ON m.id = ma."messageId"
+          INNER JOIN "UserMaster" u ON u.id = m."senderUserId"
+          WHERE m."conversationId" = $1 AND m."isDeleted" = false
+          ORDER BY ma."createdAt" DESC
+        `,
+        [conversationId],
+      );
+
+      for (const row of attachmentsResult.rows) {
+        const isMedia = row.mimeType.startsWith('image/') || row.mimeType.startsWith('video/');
+        if (type === 'media' && !isMedia) continue;
+        if (type === 'docs' && isMedia) continue;
+
+        mediaList.push({
+          id: row.uuid,
+          type: row.mimeType.startsWith('image/')
+            ? 'IMAGE'
+            : row.mimeType.startsWith('video/')
+              ? 'VIDEO'
+              : 'FILE',
+          url: row.storageKey,
+          name: row.fileName,
+          sizeBytes: row.fileSizeBytes,
+          mimeType: row.mimeType,
+          createdAt: row.createdAt,
+          senderName: row.senderName,
+        });
+      }
+    }
+
+    if (type === 'all' || type === 'links') {
+      const linksResult = await this.pool.query<{
+        uuid: string;
+        content: string;
+        createdAt: Date;
+        senderName: string;
+      }>(
+        `
+          SELECT m.uuid, m.content, m."createdAt", u.name AS "senderName"
+          FROM "Message" m
+          INNER JOIN "UserMaster" u ON u.id = m."senderUserId"
+          WHERE m."conversationId" = $1 
+            AND (m.content LIKE '%http://%' OR m.content LIKE '%https://%')
+            AND m."isDeleted" = false
+          ORDER BY m."createdAt" DESC
+        `,
+        [conversationId],
+      );
+
+      for (const row of linksResult.rows) {
+        if (!row.content) continue;
+        const matches = row.content.match(/https?:\/\/[^\s]+/g);
+        if (matches) {
+          for (const url of matches) {
+            mediaList.push({
+              id: `${row.uuid}-${url.slice(0, 10)}`,
+              type: 'LINK',
+              url,
+              name: url,
+              sizeBytes: 0,
+              mimeType: 'text/html',
+              createdAt: row.createdAt,
+              senderName: row.senderName,
+            });
+          }
+        }
+      }
+    }
+
+    return mediaList;
+  }
+
+  async addGroupMembers({
+    organizationId,
+    currentUserId,
+    conversationUuid,
+    memberIds,
+  }: {
+    organizationId: number;
+    currentUserId: number;
+    conversationUuid: string;
+    memberIds: number[];
+  }) {
+    const convResult = await this.pool.query<{ id: number }>(
+      `
+        SELECT c.id
+        FROM "Conversation" c
+        WHERE c.uuid = $1 
+          AND c."organizationId" = $2 
+          AND c.type = 'GROUP' 
+          AND c."isDeleted" = false
+          AND (
+            EXISTS (
+              SELECT 1 FROM "ConversationParticipant" cp 
+              WHERE cp."conversationId" = c.id AND cp."userId" = $3 AND cp."isActive" = true
+            )
+            OR c."createdById" = $3
+          )
+      `,
+      [conversationUuid, organizationId, currentUserId],
+    );
+
+    if (convResult.rows.length === 0) {
+      throw new NotFoundException('Group conversation not found or permission denied');
+    }
+
+    const conversationId = convResult.rows[0].id;
+
+    for (const memberId of memberIds) {
+      const userCheck = await this.pool.query<{ id: number }>(
+        `SELECT id FROM "UserMaster" WHERE id = $1 AND "organizationId" = $2 AND "isDeleted" = false`,
+        [memberId, organizationId],
+      );
+      if (userCheck.rows.length === 0) continue;
+
+      const participantCheck = await this.pool.query<{ id: number; isActive: boolean }>(
+        `SELECT id, "isActive" FROM "ConversationParticipant" WHERE "conversationId" = $1 AND "userId" = $2`,
+        [conversationId, memberId],
+      );
+
+      if (participantCheck.rows.length > 0) {
+        if (!participantCheck.rows[0].isActive) {
+          await this.pool.query(
+            `UPDATE "ConversationParticipant" SET "isActive" = true, "updatedAt" = CURRENT_TIMESTAMP WHERE id = $1`,
+            [participantCheck.rows[0].id],
+          );
+        }
+      } else {
+        await this.pool.query(
+          `
+            INSERT INTO "ConversationParticipant" (
+              uuid, "conversationId", "userId", role, "joinedAt", "isActive", "createdAt", "updatedAt"
+            )
+            VALUES (gen_random_uuid(), $1, $2, 'MEMBER', CURRENT_TIMESTAMP, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `,
+          [conversationId, memberId],
+        );
+      }
+    }
+
+    return this.findGroupDetails({ organizationId, currentUserId, conversationUuid });
+  }
+
+  async removeGroupMember({
+    organizationId,
+    currentUserId,
+    conversationUuid,
+    memberId,
+  }: {
+    organizationId: number;
+    currentUserId: number;
+    conversationUuid: string;
+    memberId: number;
+  }) {
+    const convResult = await this.pool.query<{ id: number; createdById: number }>(
+      `
+        SELECT c.id, c."createdById"
+        FROM "Conversation" c
+        WHERE c.uuid = $1 
+          AND c."organizationId" = $2 
+          AND c.type = 'GROUP' 
+          AND c."isDeleted" = false
+          AND (
+            EXISTS (
+              SELECT 1 FROM "ConversationParticipant" cp 
+              WHERE cp."conversationId" = c.id AND cp."userId" = $3 AND cp."isActive" = true
+            )
+            OR c."createdById" = $3
+          )
+      `,
+      [conversationUuid, organizationId, currentUserId],
+    );
+
+    if (convResult.rows.length === 0) {
+      throw new NotFoundException('Group conversation not found');
+    }
+
+    const conversation = convResult.rows[0];
+
+    if (memberId !== currentUserId && conversation.createdById !== currentUserId) {
+      throw new BadRequestException('Only group admins can remove other members');
+    }
+
+    await this.pool.query(
+      `
+        UPDATE "ConversationParticipant"
+        SET "isActive" = false, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "conversationId" = $1 AND "userId" = $2
+      `,
+      [conversation.id, memberId],
+    );
+
+    return { message: 'Member removed successfully' };
+  }
+
   private mapDirectConversationRow(
     row: DirectConversationRow,
   ): DirectConversationSummaryRecord {
@@ -3313,7 +3713,7 @@ export class PrismaService implements OnModuleDestroy {
 
     const attachments: DirectMessageAttachmentInput[] = attsResult.rows.map((att) => ({
       uuid: randomUUID(),
-      attachmentType: att.type === 'IMAGE' ? 'IMAGE' : 'DOCUMENT',
+      attachmentType: (['IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'OTHER'].includes(att.type) ? att.type : 'DOCUMENT') as 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'OTHER',
       name: att.name,
       key: att.url,
       mimeType: att.mimeType,

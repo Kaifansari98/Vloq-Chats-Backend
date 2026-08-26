@@ -197,7 +197,15 @@ export class NotificationsService {
       data: Record<string, string>;
     },
   ): Promise<void> {
-    if (!this.messaging || userIds.length === 0) {
+    if (!this.messaging) {
+      console.warn(
+        '⚠️ [FCM BACKEND WARNING] Firebase Messaging is NOT initialized! Check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in backend .env file.',
+      );
+      return;
+    }
+
+    if (userIds.length === 0) {
+      console.log('[FCM BACKEND] No recipient user IDs provided for push notification.');
       return;
     }
 
@@ -207,8 +215,20 @@ export class NotificationsService {
       });
 
       if (tokens.length === 0) {
+        console.warn(
+          `⚠️ [FCM BACKEND WARNING] No FCM Push Tokens found in DB for user IDs: [${userIds.join(
+            ', ',
+          )}]. Ensure the mobile app has logged in and registered push tokens via POST /users/push-tokens.`,
+        );
         return;
       }
+
+      console.log(
+        `🚀 [FCM BACKEND] Sending FCM Push Notification to ${tokens.length} token(s) for user IDs: [${userIds.join(
+          ', ',
+        )}]`,
+      );
+      console.log(`   Title: "${payload.title}" | Body: "${payload.body}"`);
 
       const multicastPayload: MulticastMessage = {
         tokens: tokens.map((item) => item.token),
@@ -217,6 +237,31 @@ export class NotificationsService {
           body: payload.body,
         },
         data: payload.data,
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'messages',
+            title: payload.title,
+            body: payload.body,
+            sound: 'default',
+            priority: 'high',
+            defaultVibrateTimings: true,
+            defaultLightSettings: true,
+            visibility: 'public',
+          },
+        },
+        apns: {
+          payload: {
+            aps: {
+              alert: {
+                title: payload.title,
+                body: payload.body,
+              },
+              sound: 'default',
+              badge: 1,
+            },
+          },
+        },
         webpush: {
           fcmOptions: {
             link: payload.link,
@@ -227,12 +272,24 @@ export class NotificationsService {
       const response = await this.messaging.sendEachForMulticast(
         multicastPayload,
       );
+
+      console.log(
+        `✅ [FCM BACKEND SUCCESS] Multicast result: ${response.successCount} succeeded, ${response.failureCount} failed.`,
+      );
+
       const invalidTokens = response.responses.flatMap((result, index) => {
         if (result.success) {
           return [];
         }
 
         const code = result.error?.code;
+        console.warn(
+          `❌ [FCM BACKEND ERROR] Token [${multicastPayload.tokens[index]?.slice(
+            0,
+            20,
+          )}...] failed to deliver: ${result.error?.message} (code: ${code})`,
+        );
+
         if (
           code === 'messaging/invalid-registration-token' ||
           code === 'messaging/registration-token-not-registered'
@@ -247,9 +304,12 @@ export class NotificationsService {
         await this.prisma.userPushToken.deleteManyByTokens({
           tokens: invalidTokens,
         });
+        console.log(
+          `🧹 [FCM BACKEND] Cleaned up ${invalidTokens.length} expired/invalid FCM tokens from DB.`,
+        );
       }
     } catch (error) {
-      console.error('Failed to send push notification', error);
+      console.error('❌ [FCM BACKEND FATAL ERROR] Failed to send push notification:', error);
     }
   }
 

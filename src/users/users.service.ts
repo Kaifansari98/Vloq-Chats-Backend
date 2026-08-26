@@ -228,7 +228,7 @@ export class UsersService {
       data: {
         userId: user.id,
         token: data.token.trim(),
-        platform: 'WEB',
+        platform: data.platform ? data.platform.toUpperCase() : 'ANDROID',
         userAgent: data.userAgent?.trim() || null,
       },
     });

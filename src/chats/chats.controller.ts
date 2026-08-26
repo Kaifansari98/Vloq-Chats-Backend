@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -31,6 +32,10 @@ import {
   createGroupChatSchema,
   type CreateGroupChatDto,
 } from './dto/create-group-chat.schema';
+import {
+  addGroupMembersSchema,
+  type AddGroupMembersDto,
+} from './dto/add-group-members.schema';
 import {
   createGroupMessageSchema,
   type CreateGroupMessageDto,
@@ -121,6 +126,65 @@ export class ChatsController {
     return this.chatsService.createGroupChat(req.user, data);
   }
 
+  @Get('group/:conversationUuid/media')
+  getGroupMedia(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Query('type') type?: 'media' | 'docs' | 'links' | 'all',
+  ) {
+    return this.chatsService.getGroupMedia(
+      req.user,
+      conversationUuid,
+      type ?? 'all',
+    );
+  }
+
+  @Post('group/:conversationUuid/members')
+  async addGroupMembers(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Body() body: unknown,
+  ) {
+    const result = addGroupMembersSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    return this.chatsService.addGroupMembers(
+      req.user,
+      conversationUuid,
+      result.data.memberIds,
+    );
+  }
+
+  @Delete('group/:conversationUuid/members/:memberId')
+  removeGroupMember(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Param('memberId') memberIdValue: string,
+  ) {
+    const memberId = Number(memberIdValue);
+
+    if (!Number.isInteger(memberId) || memberId <= 0) {
+      throw new BadRequestException('memberId must be a positive integer');
+    }
+
+    return this.chatsService.removeGroupMember(
+      req.user,
+      conversationUuid,
+      memberId,
+    );
+  }
+
+  @Get('group/:conversationUuid')
+  getGroupDetails(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+  ) {
+    return this.chatsService.getGroupDetails(req.user, conversationUuid);
+  }
+
   @Get('group/:conversationUuid/messages')
   listGroupMessages(
     @Req() req: AuthenticatedRequest,
@@ -147,7 +211,7 @@ export class ChatsController {
 
   @Post('group/:conversationUuid/messages/upload')
   @UseInterceptors(
-    FilesInterceptor('files', 5, {
+    FilesInterceptor('files', 10, {
       storage: memoryStorage(),
       limits: { fileSize: MAX_FILE_SIZE_BYTES },
     }),
@@ -242,7 +306,7 @@ export class ChatsController {
 
   @Post('direct/messages/upload')
   @UseInterceptors(
-    FilesInterceptor('files', 5, {
+    FilesInterceptor('files', 10, {
       storage: memoryStorage(),
       limits: { fileSize: MAX_FILE_SIZE_BYTES },
     }),

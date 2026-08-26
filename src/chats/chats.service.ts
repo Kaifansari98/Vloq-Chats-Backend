@@ -206,8 +206,8 @@ export class ChatsService {
       throw new BadRequestException('At least one file is required');
     }
 
-    if (files.length > 5) {
-      throw new BadRequestException('Maximum 5 files allowed per message');
+    if (files.length > 10) {
+      throw new BadRequestException('Maximum 10 files allowed per message');
     }
 
     const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
@@ -253,6 +253,10 @@ export class ChatsService {
       // files and uploaded have identical length — index is always valid
       attachmentType: this.storageService.isImageMimeType(files[i].mimetype)
         ? ('IMAGE' as const)
+        : files[i].mimetype.startsWith('video/')
+        ? ('VIDEO' as const)
+        : files[i].mimetype.startsWith('audio/')
+        ? ('AUDIO' as const)
         : ('DOCUMENT' as const),
       name: uf.originalName,
       key: uf.key,
@@ -439,8 +443,8 @@ export class ChatsService {
       throw new BadRequestException('At least one file is required');
     }
 
-    if (files.length > 5) {
-      throw new BadRequestException('Maximum 5 files allowed per message');
+    if (files.length > 10) {
+      throw new BadRequestException('Maximum 10 files allowed per message');
     }
 
     const maxMb = Math.round(this.storageService.maxFileSize / (1024 * 1024));
@@ -480,6 +484,10 @@ export class ChatsService {
       uuid: randomUUID(),
       attachmentType: this.storageService.isImageMimeType(files[i].mimetype)
         ? ('IMAGE' as const)
+        : files[i].mimetype.startsWith('video/')
+        ? ('VIDEO' as const)
+        : files[i].mimetype.startsWith('audio/')
+        ? ('AUDIO' as const)
         : ('DOCUMENT' as const),
       name: uf.originalName,
       key: uf.key,
@@ -642,17 +650,16 @@ export class ChatsService {
     conversationType: 'DIRECT' | 'GROUP',
     conversationName?: string,
   ) {
-    const offlineUserIds = [...new Set(participantIds)].filter(
-      (userId) =>
-        userId !== message.senderId && !this.chatsGateway.isUserOnline(userId),
+    const recipientUserIds = [...new Set(participantIds)].filter(
+      (userId) => userId !== message.senderId,
     );
 
-    if (offlineUserIds.length === 0) {
+    if (recipientUserIds.length === 0) {
       return;
     }
 
     void this.notificationsService.sendChatMessageNotification({
-      recipientUserIds: offlineUserIds,
+      recipientUserIds,
       message,
       conversationType,
       conversationName,
@@ -865,5 +872,134 @@ export class ChatsService {
       message: 'Message forwarded successfully',
       forwardedCount,
     };
+  }
+
+  async getGroupDetails(user: UserMasterRecord, conversationUuid: string) {
+    const details = await this.prisma.conversation.findGroupDetails({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      conversationUuid,
+    });
+
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    let avatarUrl = details.avatarUrl;
+    if (avatarUrl) {
+      avatarUrl = await this.storageService.getAccessibleUrl(
+        avatarUrl,
+        provider,
+      );
+    }
+
+    const participants = await Promise.all(
+      details.participants.map(async (p) => {
+        if (!p.profile_pic_url) return p;
+        const profile_pic_url = await this.storageService.getAccessibleUrl(
+          p.profile_pic_url,
+          provider,
+        );
+        return { ...p, profile_pic_url };
+      }),
+    );
+
+    return {
+      message: 'Group details fetched successfully',
+      data: {
+        ...details,
+        avatarUrl,
+        participants,
+      },
+    };
+  }
+
+  async getGroupMedia(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    type: 'media' | 'docs' | 'links' | 'all',
+  ) {
+    const items = await this.prisma.conversation.findGroupMedia({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      conversationUuid,
+      type,
+    });
+
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    const enrichedItems = await Promise.all(
+      items.map(async (item) => {
+        if (item.type === 'LINK' || !item.url) return item;
+        const url = await this.storageService.getAccessibleUrl(
+          item.url,
+          provider,
+        );
+        return { ...item, url };
+      }),
+    );
+
+    return {
+      message: 'Group media fetched successfully',
+      data: enrichedItems,
+    };
+  }
+
+  async addGroupMembers(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    memberIds: number[],
+  ) {
+    const updated = await this.prisma.conversation.addGroupMembers({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      conversationUuid,
+      memberIds,
+    });
+
+    const provider = await this.getOrganizationUploadProvider(
+      user.organizationId,
+    );
+
+    const participants = await Promise.all(
+      updated.participants.map(async (p) => {
+        if (!p.profile_pic_url) return p;
+        const profile_pic_url = await this.storageService.getAccessibleUrl(
+          p.profile_pic_url,
+          provider,
+        );
+        return { ...p, profile_pic_url };
+      }),
+    );
+
+    this.chatsGateway.emitGroupCreated(
+      updated.participants.map((p) => p.id),
+      conversationUuid,
+    );
+
+    return {
+      message: 'Members added successfully',
+      data: {
+        ...updated,
+        participants,
+      },
+    };
+  }
+
+  async removeGroupMember(
+    user: UserMasterRecord,
+    conversationUuid: string,
+    memberId: number,
+  ) {
+    const result = await this.prisma.conversation.removeGroupMember({
+      organizationId: user.organizationId,
+      currentUserId: user.id,
+      conversationUuid,
+      memberId,
+    });
+
+    return result;
   }
 }
