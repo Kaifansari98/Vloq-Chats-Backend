@@ -23,11 +23,7 @@ type SocketJwtPayload = {
 
 @WebSocketGateway({
   cors: {
-    origin: [
-      'http://localhost:3999',
-      'http://127.0.0.1:3999',
-      'https://chat.nexyn.com',
-    ],
+    origin: true,
     credentials: true,
   },
 })
@@ -143,7 +139,10 @@ export class ChatsGateway
     const roomIds = new Set([message.senderId, participantUserId]);
 
     roomIds.forEach((userId) => {
-      this.server.to(this.getUserRoom(userId)).emit('direct_message:new', message);
+      this.server.to(this.getUserRoom(userId)).emit('direct_message:new', {
+        ...message,
+        isOwnMessage: userId === message.senderId,
+      });
     });
   }
 
@@ -151,7 +150,10 @@ export class ChatsGateway
     const roomIds = new Set([message.senderId, participantUserId]);
 
     roomIds.forEach((userId) => {
-      this.server.to(this.getUserRoom(userId)).emit('direct_message:updated', message);
+      this.server.to(this.getUserRoom(userId)).emit('direct_message:updated', {
+        ...message,
+        isOwnMessage: userId === message.senderId,
+      });
     });
   }
 
@@ -165,7 +167,10 @@ export class ChatsGateway
     participantIds.forEach((userId) => {
       this.server
         .to(this.getUserRoom(userId))
-        .emit('group_message:new', message);
+        .emit('group_message:new', {
+          ...message,
+          isOwnMessage: userId === message.senderId,
+        });
     });
   }
 
@@ -173,7 +178,10 @@ export class ChatsGateway
     participantIds.forEach((userId) => {
       this.server
         .to(this.getUserRoom(userId))
-        .emit('group_message:updated', message);
+        .emit('group_message:updated', {
+          ...message,
+          isOwnMessage: userId === message.senderId,
+        });
     });
   }
 

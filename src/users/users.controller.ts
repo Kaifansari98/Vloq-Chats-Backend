@@ -28,7 +28,7 @@ type AuthenticatedRequest = Request & {
   user: UserMasterRecord;
 };
 
-@Controller('users')
+@Controller(['users', 'app/users'])
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
@@ -136,7 +136,7 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Post('push-tokens')
+  @Post(['app/push-tokens', 'push-tokens'])
   async registerPushToken(
     @Req() req: AuthenticatedRequest,
     @Body() body: unknown,
@@ -152,7 +152,7 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Post('push-tokens/remove')
+  @Post(['app/push-tokens/remove', 'push-tokens/remove'])
   async removePushToken(
     @Req() req: AuthenticatedRequest,
     @Body() body: unknown,

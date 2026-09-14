@@ -1,3 +1,4 @@
+import type { SearchMessagesDto } from './dto/search-messages.schema';
 import {
   BadRequestException,
   Injectable,
@@ -138,6 +139,23 @@ export class ChatsService {
       message: 'Direct chat ready',
       data: await this.resolveDirectConvProfilePic(conversation, provider),
     };
+  }
+
+  async searchDirectMessages(user: UserMasterRecord, participantUserId: number, search: SearchMessagesDto) {
+    if (participantUserId === user.id) throw new BadRequestException('You cannot search a direct chat with yourself');
+    await this.ensureDirectParticipant(user, participantUserId);
+    const messages = await this.prisma.message.findDirectMessages({ organizationId: user.organizationId, currentUserId: user.id, participantUserId, search });
+    return this.searchResponse(user, messages, search);
+  }
+
+  async searchGroupMessages(user: UserMasterRecord, conversationUuid: string, search: SearchMessagesDto) {
+    const messages = await this.prisma.message.findGroupMessages({ organizationId: user.organizationId, currentUserId: user.id, conversationUuid, search });
+    return this.searchResponse(user, messages, search);
+  }
+
+  private async searchResponse(user: UserMasterRecord, messages: DirectMessageRecord[], search: SearchMessagesDto) {
+    const provider = await this.getOrganizationUploadProvider(user.organizationId);
+    return { data: await this.enrichWithAccessUrls(messages.slice(0, search.limit), provider), pagination: { page: search.page, limit: search.limit, hasMore: messages.length > search.limit } };
   }
 
   async listDirectMessages(
@@ -872,6 +890,34 @@ export class ChatsService {
       message: 'Message forwarded successfully',
       forwardedCount,
     };
+  }
+
+  async getDirectDetails(user: UserMasterRecord, participantUserId: number) {
+    if (participantUserId === user.id) throw new BadRequestException('You cannot open a direct chat with yourself');
+    const participant = await this.ensureDirectParticipant(user, participantUserId);
+    const { conversationUuid, items } = await this.prisma.findDirectSharedMedia({
+      organizationId: user.organizationId, currentUserId: user.id, participantUserId, type: 'all',
+    });
+    const provider = await this.getOrganizationUploadProvider(user.organizationId);
+    return { data: {
+      conversationUuid,
+      participant: { id: participant.id, uuid: participant.uuid, name: participant.name, email: participant.email,
+        profilePicUrl: participant.profile_pic ? await this.storageService.getAccessibleUrl(participant.profile_pic, provider) : null },
+      mediaCount: items.filter(item => item.type === 'IMAGE' || item.type === 'VIDEO').length,
+      docsCount: items.filter(item => item.type === 'FILE').length,
+      linksCount: items.filter(item => item.type === 'LINK').length,
+    } };
+  }
+
+  async getDirectMedia(user: UserMasterRecord, participantUserId: number, type: 'media' | 'docs' | 'links' | 'all') {
+    if (participantUserId === user.id) throw new BadRequestException('You cannot open a direct chat with yourself');
+    await this.ensureDirectParticipant(user, participantUserId);
+    const { items } = await this.prisma.findDirectSharedMedia({ organizationId: user.organizationId, currentUserId: user.id, participantUserId, type });
+    const provider = await this.getOrganizationUploadProvider(user.organizationId);
+    const data = await Promise.all(items.map(async item => item.type === 'LINK' || !item.url ? item : {
+      ...item, url: await this.storageService.getAccessibleUrl(item.url, provider),
+    }));
+    return { data };
   }
 
   async getGroupDetails(user: UserMasterRecord, conversationUuid: string) {

@@ -1,3 +1,4 @@
+import { searchMessagesSchema } from './dto/search-messages.schema';
 import {
   BadRequestException,
   Body,
@@ -81,7 +82,7 @@ const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB ?? '10');
 const MAX_FILE_SIZE_BYTES =
   (Number.isFinite(maxFileSizeMb) ? maxFileSizeMb : 10) * 1024 * 1024;
 
-@Controller('chats')
+@Controller(['chats', 'app/chats'])
 @UseGuards(JwtAuthGuard)
 export class ChatsController {
   constructor(private readonly chatsService: ChatsService) {}
@@ -126,7 +127,7 @@ export class ChatsController {
     return this.chatsService.createGroupChat(req.user, data);
   }
 
-  @Get('group/:conversationUuid/media')
+  @Get(['app/group/:conversationUuid/media', 'group/:conversationUuid/media'])
   getGroupMedia(
     @Req() req: AuthenticatedRequest,
     @Param('conversationUuid') conversationUuid: string,
@@ -139,7 +140,7 @@ export class ChatsController {
     );
   }
 
-  @Post('group/:conversationUuid/members')
+  @Post(['app/group/:conversationUuid/members', 'group/:conversationUuid/members'])
   async addGroupMembers(
     @Req() req: AuthenticatedRequest,
     @Param('conversationUuid') conversationUuid: string,
@@ -158,7 +159,7 @@ export class ChatsController {
     );
   }
 
-  @Delete('group/:conversationUuid/members/:memberId')
+  @Delete(['app/group/:conversationUuid/members/:memberId', 'group/:conversationUuid/members/:memberId'])
   removeGroupMember(
     @Req() req: AuthenticatedRequest,
     @Param('conversationUuid') conversationUuid: string,
@@ -253,6 +254,46 @@ export class ChatsController {
     return this.chatsService.createOrGetDirectChat(req.user, data);
   }
 
+  @Get('direct/:participantUserId/info')
+  getDirectDetails(@Req() req: AuthenticatedRequest, @Param('participantUserId') value: string) {
+    const participantUserId = Number(value);
+    if (!Number.isSafeInteger(participantUserId) || participantUserId <= 0) throw new BadRequestException('participantUserId must be a positive integer');
+    return this.chatsService.getDirectDetails(req.user, participantUserId);
+  }
+
+  @Get('direct/:participantUserId/media')
+  getDirectMedia(@Req() req: AuthenticatedRequest, @Param('participantUserId') value: string, @Query('type') type = 'all') {
+    const participantUserId = Number(value);
+    if (!Number.isSafeInteger(participantUserId) || participantUserId <= 0) throw new BadRequestException('participantUserId must be a positive integer');
+    if (type !== 'media' && type !== 'docs' && type !== 'links' && type !== 'all') throw new BadRequestException('Invalid media type');
+    return this.chatsService.getDirectMedia(req.user, participantUserId, type);
+  }
+
+  @Get('direct/messages/search')
+  searchDirectMessages(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const result = searchMessagesSchema.safeParse(query);
+    const participantUserId = Number(query.participantUserId);
+    if (!result.success) throw new BadRequestException(result.error.flatten());
+    if (!Number.isSafeInteger(participantUserId) || participantUserId <= 0) {
+      throw new BadRequestException('participantUserId must be a positive integer');
+    }
+    return this.chatsService.searchDirectMessages(req.user, participantUserId, result.data);
+  }
+
+  @Get('group/:conversationUuid/messages/search')
+  searchGroupMessages(
+    @Req() req: AuthenticatedRequest,
+    @Param('conversationUuid') conversationUuid: string,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const result = searchMessagesSchema.safeParse(query);
+    if (!result.success) throw new BadRequestException(result.error.flatten());
+    return this.chatsService.searchGroupMessages(req.user, conversationUuid, result.data);
+  }
+
   @Get('direct/messages')
   listDirectMessages(
     @Req() req: AuthenticatedRequest,
@@ -343,8 +384,8 @@ export class ChatsController {
     return this.chatsService.markDirectChatRead(req.user, data);
   }
 
-  @Put('direct/messages/:messageUuid')
-  @Patch('direct/messages/:messageUuid')
+  @Put(['app/direct/messages/:messageUuid', 'direct/messages/:messageUuid'])
+  @Patch(['app/direct/messages/:messageUuid', 'direct/messages/:messageUuid'])
   async editDirectMessage(
     @Req() req: AuthenticatedRequest,
     @Param('messageUuid') messageUuid: string,
@@ -360,8 +401,8 @@ export class ChatsController {
     return this.chatsService.editDirectMessage(req.user, messageUuid, data);
   }
 
-  @Put('group/:conversationUuid/messages/:messageUuid')
-  @Patch('group/:conversationUuid/messages/:messageUuid')
+  @Put(['app/group/:conversationUuid/messages/:messageUuid', 'group/:conversationUuid/messages/:messageUuid'])
+  @Patch(['app/group/:conversationUuid/messages/:messageUuid', 'group/:conversationUuid/messages/:messageUuid'])
   async editGroupMessage(
     @Req() req: AuthenticatedRequest,
     @Param('conversationUuid') conversationUuid: string,
@@ -383,7 +424,7 @@ export class ChatsController {
     );
   }
 
-  @Post('forward')
+  @Post(['app/forward', 'forward'])
   async forwardMessage(
     @Req() req: AuthenticatedRequest,
     @Body() body: unknown,

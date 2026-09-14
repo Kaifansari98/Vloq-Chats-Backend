@@ -79,6 +79,7 @@ describe('AuthService', () => {
       name: 'Test User',
       email: 'test@example.com',
       password: null,
+      isActive: true,
       organizationId: 10,
       userTypeId: 20,
       authProviders: [],
