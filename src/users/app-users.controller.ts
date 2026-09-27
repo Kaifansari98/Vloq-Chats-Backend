@@ -28,12 +28,24 @@ type AuthenticatedRequest = Request & {
   user: UserMasterRecord;
 };
 
-@Controller('users')
-export class UsersController {
+@Controller('app/users')
+export class AppUsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Post()
   async createUser(@Body() body: unknown) {
+    const result = createUserSchema.safeParse(body);
+
+    if (!result.success) {
+      throw new BadRequestException(result.error.flatten());
+    }
+
+    const data: CreateUserDto = result.data;
+    return this.usersService.createUser(data);
+  }
+
+  @Post('create')
+  async createUserAlias(@Body() body: unknown) {
     const result = createUserSchema.safeParse(body);
 
     if (!result.success) {
@@ -82,6 +94,31 @@ export class UsersController {
     }),
   )
   async uploadProfilePic(
+    @Req() req: AuthenticatedRequest,
+    @UploadedFile() file: unknown,
+  ) {
+    if (!file || typeof file !== 'object') {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    const f = file as { buffer: Buffer; originalname: string; mimetype: string; size: number };
+
+    if (!f.buffer || !f.mimetype) {
+      throw new BadRequestException('Invalid file');
+    }
+
+    return this.usersService.uploadProfilePic(req.user, f);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('profile-pic')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_PROFILE_PIC_BYTES },
+    }),
+  )
+  async uploadProfilePicAlias(
     @Req() req: AuthenticatedRequest,
     @UploadedFile() file: unknown,
   ) {
