@@ -16,7 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import type { UserMasterRecord } from '../prisma/prisma.service';
+import { PrismaService, type UserMasterRecord } from '../prisma/prisma.service';
 import { UsersService } from './users.service';
 import { CreateUserDto, createUserSchema } from './dto/create-user.schema';
 import { updateUserSchema } from './dto/update-user.schema';
@@ -30,30 +30,64 @@ type AuthenticatedRequest = Request & {
 
 @Controller('app/users')
 export class AppUsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly prisma: PrismaService,
+  ) {}
 
+  @UseGuards(JwtAuthGuard)
   @Post()
-  async createUser(@Body() body: unknown) {
-    const result = createUserSchema.safeParse(body);
+  async createUser(@Req() req: AuthenticatedRequest, @Body() body: Record<string, unknown>) {
+    let orgId = body.organizationId;
+    let userTypeId = body.userTypeId;
+
+    const authUser = req.user;
+    if (!orgId && authUser?.organizationId) {
+      orgId = authUser.organizationId;
+    } else if (!orgId) {
+      const defaultOrg = await this.prisma.organizationMaster.findById({ where: { id: 2 } });
+      orgId = defaultOrg?.id ?? 2;
+    }
+
+    if (!userTypeId) {
+      const roleStr = typeof body.role === 'string' ? body.role.toUpperCase() : 'MEMBER';
+      const role = await this.prisma.userTypeMaster.findUnique({ where: { code: roleStr } });
+      userTypeId = role?.id ?? (roleStr === 'ADMIN' ? 1 : 2);
+    }
+
+    const payload = {
+      name: body.name,
+      email: typeof body.email === 'string' ? body.email.toLowerCase().trim() : '',
+      password: body.password,
+      organizationId: Number(orgId),
+      userTypeId: Number(userTypeId),
+      provider: body.provider || 'EMAIL',
+      providerId: body.providerId,
+    };
+
+    const result = createUserSchema.safeParse(payload);
 
     if (!result.success) {
-      throw new BadRequestException(result.error.flatten());
+      const flat = result.error.flatten();
+      const firstError =
+        Object.values(flat.fieldErrors)[0]?.[0] ||
+        flat.formErrors[0] ||
+        'Invalid user creation parameters';
+      throw new BadRequestException(firstError);
     }
 
     const data: CreateUserDto = result.data;
-    return this.usersService.createUser(data);
+    const response = await this.usersService.createUser(data);
+    return {
+      ...response,
+      user: response.data,
+    };
   }
 
+  @UseGuards(JwtAuthGuard)
   @Post('create')
-  async createUserAlias(@Body() body: unknown) {
-    const result = createUserSchema.safeParse(body);
-
-    if (!result.success) {
-      throw new BadRequestException(result.error.flatten());
-    }
-
-    const data: CreateUserDto = result.data;
-    return this.usersService.createUser(data);
+  async createUserAlias(@Req() req: AuthenticatedRequest, @Body() body: Record<string, unknown>) {
+    return this.createUser(req, body);
   }
 
   @UseGuards(JwtAuthGuard)
