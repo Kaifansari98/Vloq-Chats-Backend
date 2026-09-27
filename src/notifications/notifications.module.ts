@@ -3,11 +3,12 @@ import { AuthModule } from '../auth/auth.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StorageModule } from '../storage/storage.module';
 import { NotificationsController } from './notifications.controller';
+import { AppNotificationsController } from './app-notifications.controller';
 import { NotificationsService } from './notifications.service';
 
 @Module({
   imports: [PrismaModule, AuthModule, StorageModule],
-  controllers: [NotificationsController],
+  controllers: [NotificationsController, AppNotificationsController],
   providers: [NotificationsService],
   exports: [NotificationsService],
 })

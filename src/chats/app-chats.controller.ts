@@ -82,9 +82,9 @@ const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB ?? '10');
 const MAX_FILE_SIZE_BYTES =
   (Number.isFinite(maxFileSizeMb) ? maxFileSizeMb : 10) * 1024 * 1024;
 
-@Controller('chats')
+@Controller('app/chats')
 @UseGuards(JwtAuthGuard)
-export class ChatsController {
+export class AppChatsController {
   constructor(private readonly chatsService: ChatsService) {}
 
   @Get('direct')

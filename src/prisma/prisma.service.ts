@@ -357,6 +357,7 @@ type FindDirectMessagesArgs = {
   organizationId: number;
   currentUserId: number;
   participantUserId: number;
+  search?: { q: string; page: number; limit: number };
 };
 
 type FindDirectAttachmentForUserArgs = {
@@ -410,6 +411,7 @@ type FindGroupMessagesArgs = {
   conversationUuid: string;
   currentUserId: number;
   organizationId: number;
+  search?: { q: string; page: number; limit: number };
 };
 
 type CreateGroupMessageArgs = {
@@ -1989,6 +1991,7 @@ export class PrismaService implements OnModuleDestroy {
     organizationId,
     currentUserId,
     participantUserId,
+    search,
   }: FindDirectMessagesArgs): Promise<DirectMessageRecord[]> {
     const directKey = [currentUserId, participantUserId]
       .sort((a, b) => a - b)
@@ -2070,6 +2073,7 @@ export class PrismaService implements OnModuleDestroy {
           AND c.type = 'DIRECT'
           AND c."directKey" = $4
           AND c."isDeleted" = false
+          AND ($5::text IS NULL OR strpos(lower(COALESCE(m.content, '')), lower($5)) > 0)
         GROUP BY
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."isEdited", m."editedAt", m.metadata, m."senderId",
           c.uuid,
@@ -2077,13 +2081,14 @@ export class PrismaService implements OnModuleDestroy {
           other_participant."lastReadMessageId", other_participant."lastReadAt",
           parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type,
           parent_first_att.mime_type
-        ORDER BY m."createdAt" ASC, m.id ASC
+        ORDER BY ${search ? 'm."createdAt" DESC, m.id DESC' : 'm."createdAt" ASC, m.id ASC'}
+        LIMIT $6 OFFSET $7
       `,
-      [currentUserId, participantUserId, organizationId, directKey],
+      [currentUserId, participantUserId, organizationId, directKey, search?.q ?? null, search ? search.limit + 1 : null, search ? (search.page - 1) * search.limit : 0],
     );
 
     const conversationUuid = result.rows[0]?.conversation_uuid;
-    if (conversationUuid) {
+    if (conversationUuid && !search) {
       await this.markConversationNotificationsRead({
         userId: currentUserId,
         conversationUuid,
@@ -2482,6 +2487,7 @@ export class PrismaService implements OnModuleDestroy {
     conversationUuid,
     currentUserId,
     organizationId,
+    search,
   }: FindGroupMessagesArgs): Promise<DirectMessageRecord[]> {
     const result = await this.pool.query<DirectMessageRow>(
       `
@@ -2542,26 +2548,30 @@ export class PrismaService implements OnModuleDestroy {
           AND c.type = 'GROUP'
           AND c."isDeleted" = false
           AND c."organizationId" = $3
+          AND ($4::text IS NULL OR strpos(lower(COALESCE(m.content, '')), lower($4)) > 0)
         GROUP BY
           m.id, m.uuid, m.content, m.type, m."createdAt", m."updatedAt", m."isEdited", m."editedAt", m.metadata, m."senderId",
           c.uuid,
           sender.id, sender.uuid, sender.name,
           parent_msg.uuid, parent_sender.name, parent_msg.content, parent_msg.type,
           parent_first_att.mime_type
-        ORDER BY m."createdAt" ASC, m.id ASC
+        ORDER BY ${search ? 'm."createdAt" DESC, m.id DESC' : 'm."createdAt" ASC, m.id ASC'}
+        LIMIT $5 OFFSET $6
       `,
-      [currentUserId, conversationUuid, organizationId],
+      [currentUserId, conversationUuid, organizationId, search?.q ?? null, search ? search.limit + 1 : null, search ? (search.page - 1) * search.limit : 0],
     );
 
-    await this.markGroupConversationRead({
-      conversationUuid,
-      currentUserId,
-      organizationId,
+    if (!search) {
+      await this.markGroupConversationRead({
+        conversationUuid,
+        currentUserId,
+        organizationId,
     });
     await this.markConversationNotificationsRead({
       userId: currentUserId,
       conversationUuid,
     });
+    }
 
     return result.rows.map((row) => this.mapDirectMessageRow(row));
   }
@@ -3166,7 +3176,30 @@ export class PrismaService implements OnModuleDestroy {
       throw new NotFoundException('Group conversation not found');
     }
 
-    const conversationId = convResult.rows[0].id;
+    return this.findConversationMedia(convResult.rows[0].id, type);
+  }
+
+  async findDirectSharedMedia({ organizationId, currentUserId, participantUserId, type }: {
+    organizationId: number; currentUserId: number; participantUserId: number;
+    type: 'media' | 'docs' | 'links' | 'all';
+  }) {
+    const result = await this.pool.query<{ id: number; uuid: string }>(`
+      SELECT c.id, c.uuid FROM "Conversation" c
+      INNER JOIN "ConversationParticipant" me ON me."conversationId" = c.id
+        AND me."userId" = $2 AND me."isActive" = true
+      INNER JOIN "ConversationParticipant" peer ON peer."conversationId" = c.id
+        AND peer."userId" = $3 AND peer."isActive" = true
+      WHERE c."organizationId" = $1 AND c.type = 'DIRECT'
+        AND c."directKey" = $4 AND c."isDeleted" = false
+    `, [organizationId, currentUserId, participantUserId, [currentUserId, participantUserId].sort((a, b) => a - b).join('_')]);
+    const conversation = result.rows[0];
+    return {
+      conversationUuid: conversation?.uuid ?? null,
+      items: conversation ? await this.findConversationMedia(conversation.id, type) : [],
+    };
+  }
+
+  private async findConversationMedia(conversationId: number, type: 'media' | 'docs' | 'links' | 'all') {
     const mediaList: Array<{
       id: string;
       type: 'IMAGE' | 'VIDEO' | 'FILE' | 'LINK';
@@ -3191,12 +3224,12 @@ export class PrismaService implements OnModuleDestroy {
       }>(
         `
           SELECT 
-            ma.uuid, ma."fileName", ma."fileType", ma."mimeType", 
-            ma."fileSizeBytes", ma."storageKey", ma."createdAt",
+            ma.uuid, ma.name AS "fileName", ma.type AS "fileType", ma."mimeType",
+            ma.size AS "fileSizeBytes", ma.url AS "storageKey", ma."createdAt",
             u.name AS "senderName"
           FROM "MessageAttachment" ma
           INNER JOIN "Message" m ON m.id = ma."messageId"
-          INNER JOIN "UserMaster" u ON u.id = m."senderUserId"
+          INNER JOIN "UserMaster" u ON u.id = m."senderId"
           WHERE m."conversationId" = $1 AND m."isDeleted" = false
           ORDER BY ma."createdAt" DESC
         `,
@@ -3217,7 +3250,7 @@ export class PrismaService implements OnModuleDestroy {
               : 'FILE',
           url: row.storageKey,
           name: row.fileName,
-          sizeBytes: row.fileSizeBytes,
+          sizeBytes: Number(row.fileSizeBytes),
           mimeType: row.mimeType,
           createdAt: row.createdAt,
           senderName: row.senderName,
@@ -3235,7 +3268,7 @@ export class PrismaService implements OnModuleDestroy {
         `
           SELECT m.uuid, m.content, m."createdAt", u.name AS "senderName"
           FROM "Message" m
-          INNER JOIN "UserMaster" u ON u.id = m."senderUserId"
+          INNER JOIN "UserMaster" u ON u.id = m."senderId"
           WHERE m."conversationId" = $1 
             AND (m.content LIKE '%http://%' OR m.content LIKE '%https://%')
             AND m."isDeleted" = false
@@ -3248,9 +3281,9 @@ export class PrismaService implements OnModuleDestroy {
         if (!row.content) continue;
         const matches = row.content.match(/https?:\/\/[^\s]+/g);
         if (matches) {
-          for (const url of matches) {
+          for (const [index, url] of matches.entries()) {
             mediaList.push({
-              id: `${row.uuid}-${url.slice(0, 10)}`,
+              id: `${row.uuid}-${index}`,
               type: 'LINK',
               url,
               name: url,
